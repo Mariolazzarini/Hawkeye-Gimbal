@@ -76,41 +76,77 @@ Follow the on-screen menu to select the optimization mode (Fast, Normal, Extende
 
 ## Repository Structure
 hawkeye-gimbal/
+
 │
+
 ├── README.md
+
 ├── LICENSE
+
 ├── .gitignore
+
 ├── requirements.txt
+
 │
+
 ├── docs/
+
 │   └── MDPI___Hawkeye_Paper.pdf
+
 │
+
 ├── src/
+
 │   └── sspid2/
+
 │       ├── package.xml
+
 │       ├── setup.py
+
 │       ├── setup.cfg
+
 │       ├── resource/
+
 │       │   └── sspid2
+
 │       ├── sspid2/
+
 │       │   ├── __init__.py
+
 │       │   ├── controller.py
+
 │       │   └── distance_to_center.py
+
 │       ├── config/
+
 │       │   └── custom_tracker.yaml
+
 │       └── launch/
+
 │           └── tracking.launch.py   # (optional)
+
 │
+
 ├── optimization/
+
 │   ├── npsoSSPID.py
+
 │   └── run_npsoSSPID.py
+
 │
+
 ├── data/
+
 │   ├── raw/
+
 │   ├── processed/
+
 │   └── results/
+
 │
+
 └── notebooks/
+
 
 ## Configuration
 Tracker configuration: custom_tracker.yaml is used by ByteTrack. You can adjust thresholds for your specific scenario. The file is loaded in distance_to_center.py; update the hardcoded path if necessary.
@@ -132,13 +168,21 @@ If you use this code in your research, please cite our paper:
 Lazzarini Sola, M., Iorpenda, M.J., Willert, V. (2026). Multi-Objective NPSO-Tuned State-Space PD Control for Vision-Based UAV Gimbal Tracking. Drones. MDPI.
 
 BibTeX:
+
 @article{Iorpenda2026Hawkeye,
+
   title={Multi-Objective NPSO-Tuned State-Space PD Control for Vision-Based UAV Gimbal Tracking},
+
   author={Iorpenda, M.J. and Lazzarini Sola, Mario and Willert, Volker},
+  
   journal={Drones},
+  
   year={2026},
+  
   publisher={MDPI}
+
 }
+
 ## Authors
 Mario Lazzarini Sola – main developer – mario.lazzarinisola@study.thws.de
 
