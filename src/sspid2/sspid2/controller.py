@@ -1,5 +1,5 @@
 ###################
-#  controller.py  # sspid2
+#  controller.py  # 
 ###################
 #
 # State-Space PD (SS-PD) gimbal controller.
