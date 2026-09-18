@@ -26,8 +26,6 @@ setup(
         'console_scripts': [
             'distance_node = sspid2.distance_to_center:main',
             'controller_node = sspid2.controller:main',
-            'controller_test_node = sspid2.controller_test:main',
-            'evaluation_node = sspid2.evaluation:main',
         ],
     },
 )
