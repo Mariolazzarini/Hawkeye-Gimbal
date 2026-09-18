@@ -42,7 +42,9 @@ Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
-Download YOLOv8 weights. Place yolov8m.pt in the src/sspid2/sspid2/ directory (or update the path in distance_to_center.py). You can download it from Ultralytics.
+Download YOLOv8 weights and place `yolov8m.pt` inside
+`src/sspid2/sspid2/config/`. The node loads it automatically
+from that path. You can download the weights from Ultralytics.
 
 Build the ROS 2 package:
 ```bash
@@ -52,7 +54,7 @@ source install/setup.bash
 
 ## Usage
 ### Running the Tracking System
-Launch the perception and controller nodes. You can use the provided launch file (if available) or run each node individually:
+Launch the perception and controller nodes:
 ```bash
 # Terminal 1: Perception node (YOLO + ByteTrack)
 ros2 run sspid2 distance_to_center
