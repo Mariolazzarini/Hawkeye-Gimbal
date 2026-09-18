@@ -35,7 +35,7 @@ An end-to-end ROS 2 and Isaac Sim framework for vision-based UAV gimbal tracking
 ## Installation
 Clone the repository:
 ```bash
-git clone https://github.com/your-username/hawkeye-gimbal.git
+git clone https://github.com/Mariolazzarini/hawkeye-gimbal.git
 cd hawkeye-gimbal
 ```
 Install Python dependencies:
@@ -59,11 +59,6 @@ ros2 run sspid2 distance_to_center
 
 # Terminal 2: Controller node (SS-PD)
 ros2 run sspid2 controller_node
-```
-Alternatively, if a launch file is present:
-
-```bash
-ros2 launch sspid2 tracking.launch.py
 ```
 The system will publish gimbal velocity commands to /cam_vel and log data to /pid_log and /control.
 
@@ -114,7 +109,7 @@ hawkeye-gimbal/
 ```
 
 ## Configuration
-Tracker configuration: custom_tracker.yaml is used by ByteTrack. You can adjust thresholds for your specific scenario. The file is loaded in distance_to_center.py; update the hardcoded path if necessary.
+Tracker configuration: custom_tracker.yaml is used by ByteTrack. You can adjust thresholds for your specific scenario. The file is loaded in distance_to_center.py.
 
 Controller gains: Default gains are defined in controller.py. You can also pass them as ROS 2 parameters:
 ```bash
@@ -128,7 +123,7 @@ To evaluate tracking performance in real time (without interfering with the cont
 ```bash
 python3 tools/evaluator.py
 ```
-Raw and processed data are stored in data/raw/. Graphic results are stored in data/restults/.
+Raw and processed data are stored in data/raw/. Graphic results are stored in data/results/.
 If you use Git LFS, you can track large files (e.g., *.pt, *.bag). Otherwise, keep them out of the repository and document their download links.
 
 ## Citation
