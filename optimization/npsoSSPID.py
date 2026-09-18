@@ -3,11 +3,11 @@
 #  Offline NPSO tuning of the State-Space PD (SS-PD) gimbal controller #
 ########################################################################
 
-import rclpy, random, time, subprocess, signal, json
+import rclpy, random, time, subprocess, signal
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 from datetime import datetime
 
@@ -16,15 +16,34 @@ Ts = 0.001  # controller sampling period, Sec. 4.4 (Eq. 9)
 EVAL_DURATION_S = 100.0 # set this to match your actual experimental setup
 EVAL_MAX_SAMPLES = int(EVAL_DURATION_S / Ts)
 
+SETTLE_BEFORE_S = 4.0   # time given to the controller / sim to settle
+CLEANUP_AFTER_S = 3.0   # time given to tear the controller process down
+
+# Wall-clock cost of a single fitness evaluation. Used only to print a time
+# estimate in run_npsoSSPID.py.
+PARTICLE_DURATION = SETTLE_BEFORE_S + EVAL_DURATION_S + CLEANUP_AFTER_S
+
+# Name of the executable created by setup.py for the controller node.
+# NOTE: 'gimbal_controller' is the ROS *node* name, not the process name, so
+# killing by that string silently matched nothing and let stale controllers
+# accumulate across the ~220 evaluations.
+CONTROLLER_EXECUTABLE = 'controller_node'
+
 # ─── Search space Omega and velocity limits (Eq. 32) ───────────────────────
 KP_RANGE = (7.0, 14.0)
 KD_RANGE = (0.0, 0.70)
+# Forward-Euler discretisation of the observer double pole at -omega_o is
+# stable only for omega_o * Ts < 2, i.e. omega_o < 2000 rad/s at Ts = 1 ms.
+# Values close to that bound are numerically poorly conditioned; report the
+# search range together with Ts in any published result.
 OMEGA_RANGE = (20.0, 1000.0)
 
 V_MAX = np.array([0.7, 0.07, 100.0])   # componentwise |v| <= vmax (Eq. 29)
 V_MIN = -V_MAX
 
 # ─── Fitness normalization constants (Eq. 26) ──────────────────────────────
+# IMPORTANT: tools/evaluator.py must use the SAME constants, otherwise the
+# "NPSO value" it reports is not the quantity that was optimised here.
 C_MAE = 50.0   # px
 C_VOL = 5.0    # px
 C_ACC = 2.0    # px
@@ -55,13 +74,18 @@ class SSPD:
     is what actually gets evaluated), but is provided so both
     implementations stay verifiably consistent, and so the controller
     can be exercised/unit-tested standalone if desired.
+
+    Like controller.py, the observer is driven with the input that is
+    actually applied to the plant, i.e. after saturation at u_max.
     """
 
-    def __init__(self, kp: float, kd: float, omega_o: float, dt: float = Ts):
+    def __init__(self, kp: float, kd: float, omega_o: float, dt: float = Ts,
+                 u_max: Optional[float] = None):
         self.kp = kp
         self.kd = kd
         self.omega_o = omega_o
         self.dt = dt
+        self.u_max = u_max          # matches MAX_VEL_TRACK in controller.py
 
         # Observer feedback coefficients (Eq. 14): poles both at -omega_o
         self.beta1 = omega_o ** 2      # beta_1 = omega_o^2
@@ -69,7 +93,7 @@ class SSPD:
 
         self.x1 = 0.0  # estimate of y_dot   (x_bar_1, Eq. 13)
         self.x2 = 0.0  # estimate of y       (x_bar_2, Eq. 13)
-        self.u_prev = 0.0  # u[k-1], stored explicitly (Eq. 16)
+        self.u_prev = 0.0  # u[k-1] actually applied, stored explicitly (Eq. 16)
 
     def reset(self):
         self.x1 = 0.0
@@ -79,7 +103,7 @@ class SSPD:
     def compute(self, alpha: float) -> float:
         """
         alpha: angular line-of-sight error for this axis (Eq. 7).
-        Returns u[k] (Eq. 20).
+        Returns u[k] (Eq. 20), saturated at u_max if one was given.
         """
         # Eq. (12): r_i[k] = 0, y_i[k] = -alpha_i[k]
         y = -alpha
@@ -93,6 +117,9 @@ class SSPD:
 
         # Control law (Eq. 20): u[k] = -KD*x1[k] - KP*x2[k]
         u = -self.kd * self.x1 - self.kp * self.x2
+
+        if self.u_max is not None:
+            u = min(self.u_max, max(-self.u_max, u))
 
         self.u_prev = u  # becomes u[k-1] for the next sample
         return u
@@ -111,7 +138,7 @@ class Particle:
     # Personal best
     b_kp: float = 0.0
     b_kd: float = 0.0
-    b_omega_o: float = 20.0
+    b_omega_o: float = 0.0
     b_fitness: float = float('inf')
     # Current state
     fitness: float = float('inf')
@@ -125,7 +152,12 @@ class DataCollectorNode(Node):
     """
     Subscribes to the signed image-plane pixel errors [e_x, e_y] published
     on /pid_log by the 'gimbal_controller' node (see controller.py),
-    matching e_t as defined in Eq. (5) of Tan et al. (Cite 6). 
+    matching e_t as defined in Eq. (5) of Tan et al. (Cite 6).
+
+    NOTE: /pid_log is published only while a target is being tracked, so the
+    fitness is evaluated over tracking samples only. Periods of target loss
+    are therefore excluded rather than penalised; the number of collected
+    samples is reported so that runs with poor availability can be spotted.
     """
 
     def __init__(self):
@@ -158,6 +190,8 @@ class OptimizationReport:
         self.num_particles = num_particles
         self.num_iterations = num_iterations
         self.start_time = datetime.now()
+        self.weights = None
+        self.interrupted = False
         self.all_particles: List[Particle] = []
         self.best_per_iteration: List[Particle] = []
 
@@ -202,6 +236,21 @@ class OptimizationReport:
                 'num_iterations_total_rounds': self.num_iterations,
                 'duration_minutes': (datetime.now() - self.start_time).total_seconds() / 60,
                 'total_evaluations': len(self.all_particles),
+                'interrupted': self.interrupted,
+                'weights': self.weights,
+                'eval_duration_sec': EVAL_DURATION_S,
+                'sampling_period_sec': Ts,
+                'search_space': {
+                    'kp': list(KP_RANGE),
+                    'kd': list(KD_RANGE),
+                    'omega_o': list(OMEGA_RANGE),
+                },
+                'normalizers': {
+                    'mae': C_MAE,
+                    'volatility': C_VOL,
+                    'acceleration': C_ACC,
+                    'zero_crossings': C_ZC,
+                },
             },
             'BEST_PARTICLE': _p_dict(sorted_particles[0]) if sorted_particles else None,
             'TOP_10_PARTICLES': [
@@ -215,22 +264,30 @@ class OptimizationReport:
 class NPSO_SSPD_Optimizer:
     """
     Implements the following offline NPSO search procedure:
-    - 20 particles, 11 total evaluation rounds -> 220 fitness evaluations
-      (round 0 = initial random sampling, rounds 1..10 = updates using
-      the schedule rho_k = k / N_IT with N_IT = 11, Eq. 31).
+    - `num_particles` particles and `num_iterations` update rounds on top of
+      the initial random sampling, i.e. num_particles * (1 + num_iterations)
+      fitness evaluations. The defaults (20, 10) reproduce the 220 closed-loop
+      evaluations reported in the paper, with N_IT = 11 inside the schedule
+      rho_k = k / N_IT (Eq. 31).
     - eta = [Kp, Kd, omega_o]^T (Eq. 11); search space Omega (Eq. 32).
     - Position update uses the global best (Eq. 30), not the particle's
       own previous position.
     """
 
-    NUM_PARTICLES = 20
-    N_IT = 11  # total iteration count used inside rho_k = k/N_IT (Eq. 31)
-    NUM_UPDATE_ROUNDS = N_IT - 1
+    def __init__(self, num_particles: int = 20, num_iterations: int = 10):
+        if num_particles < 1 or num_iterations < 1:
+            raise ValueError('num_particles and num_iterations must be >= 1')
 
-    def __init__(self):
+        self.NUM_PARTICLES = int(num_particles)
+        self.NUM_UPDATE_ROUNDS = int(num_iterations)
+        self.N_IT = self.NUM_UPDATE_ROUNDS + 1  # total rounds, used in rho_k
+
         self.kp_range = KP_RANGE
         self.kd_range = KD_RANGE
         self.omega_range = OMEGA_RANGE
+
+        # Default weights (Eq. 27); overwritten by optimize().
+        self.w_mae, self.w_vol, self.w_acc, self.w_zc = 1.0, 1.0, 1.0, 1.0
 
         self.best_global_particle: Optional[Particle] = None
         self.best_global_fitness = float('inf')
@@ -254,7 +311,7 @@ class NPSO_SSPD_Optimizer:
     # ── Launch controller process ─────────────────────────────────────────
     def _launch_controller(self, particle: Particle):
         cmd = [
-            'ros2', 'run', 'sspid2', 'controller_node',
+            'ros2', 'run', 'sspid2', CONTROLLER_EXECUTABLE,
             '--ros-args',
             '-p', f'kp_yaw:={particle.kp}',
             '-p', f'kd_yaw:={particle.kd}',
@@ -269,6 +326,11 @@ class NPSO_SSPD_Optimizer:
             stderr=subprocess.DEVNULL,
             preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN)
         )
+
+    @staticmethod
+    def _kill_stale_controllers():
+        subprocess.run(['killall', '-9', CONTROLLER_EXECUTABLE],
+                       stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 
     # ── Fitness function (Eqs. 22-28) ───────────────────────────────────────
     def _fitness(self, data: np.ndarray, particle: Particle) -> float:
@@ -292,8 +354,10 @@ class NPSO_SSPD_Optimizer:
         j_acc = np.mean(np.abs(d2_ep))
 
         # 4. Zero-crossings of e_x and e_y (Eq. 25)
-        sign_x = np.sign(ex)
-        sign_y = np.sign(ey)
+        # np.sign(0) == 0 would count a single sample sitting exactly at the
+        # centre as two crossings, so exact zeros are carried forward.
+        sign_x = _sign_no_zero(ex)
+        sign_y = _sign_no_zero(ey)
         n_zc_x = np.sum(sign_x[:-1] != sign_x[1:])
         n_zc_y = np.sum(sign_y[:-1] != sign_y[1:])
         j_zc = n_zc_x + n_zc_y
@@ -309,6 +373,7 @@ class NPSO_SSPD_Optimizer:
             'volatility': j_vol_hat,
             'acceleration': j_acc_hat,
             'zero_crossings': j_zc_hat,
+            'samples': int(len(data)),
         }
 
         # Scalar fitness (Eq. 27) -- weights are set in optimize()/main()
@@ -329,7 +394,7 @@ class NPSO_SSPD_Optimizer:
             controller_process = None
             try:
                 controller_process = self._launch_controller(particle)
-                time.sleep(4.0)  # allow the controller / sim to settle
+                time.sleep(SETTLE_BEFORE_S)  # allow the controller / sim to settle
                 self.collector_node.start_collection()
                 start_time = time.time()
                 while (time.time() - start_time < EVAL_DURATION_S) and \
@@ -349,15 +414,20 @@ class NPSO_SSPD_Optimizer:
                         controller_process.terminate()
                         controller_process.wait(timeout=2.0)
                     except Exception:
-                        pass
-                subprocess.run(['killall', '-9', 'gimbal_controller'],
-                                stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-                time.sleep(3.0)
+                        try:
+                            controller_process.kill()
+                        except Exception:
+                            pass
+                self._kill_stale_controllers()
+                time.sleep(CLEANUP_AFTER_S)
         return np.array([])
 
     # ── NPSO update (Eqs. 29-31) ────────────────────────────────────────────
     def _update_particle(self, particle: Particle, w: float, c1: float, c2: float):
         gb = self.best_global_particle
+        if gb is None:
+            # No successful evaluation yet: keep the particle where it is.
+            return
         r1 = [random.random(), random.random(), random.random()]
         r2 = [random.random(), random.random(), random.random()]
 
@@ -397,17 +467,27 @@ class NPSO_SSPD_Optimizer:
         )
 
     # ── Main optimisation loop ────────────────────────────────────────────
-    def optimize(self, w_mae=1.0, w_vol=1.0, w_zc=1.0, w_acc=1.0) -> Particle:
+    def optimize(self, w_mae=1.0, w_vol=1.0, w_acc=1.0, w_zc=1.0) -> Particle:
         """
-        w_mae, w_vol, w_acc, w_zc: fitness weights (Eq. 27), e.g.:
+        w_mae, w_vol, w_acc, w_zc: fitness weights (Eq. 27), in that order:
+
           Experiment 2 (MAE only):             1, 0,   0,   0
-          Experiment 3 (MAE + Volatility):     0, 1,   0,   0
-          Experiment 4 (MAE + Zero-Crossings): 0, 0,   1,   0
-          Experiment 5 (MAE + Acceleration):   0, 0,   0,   1
+          Experiment 3 (MAE + Volatility):     1, 1,   0,   0
+          Experiment 4 (MAE + Acceleration):   1, 0,   1,   0
+          Experiment 5 (MAE + Zero-Crossings): 1, 0,   0,   1
           Experiment 6 (equal weights):        1, 1,   1,   1
           Experiment 7 (reweighted):           1, 0.5, 0.5, 1
+
+        NOTE: the previous version of this table listed w_mae = 0 for the
+        "MAE + X" rows, which contradicted their own labels, and its column
+        order did not match the argument order. Verify the values above
+        against the weights reported in the paper before re-running.
         """
         self.w_mae, self.w_vol, self.w_acc, self.w_zc = w_mae, w_vol, w_acc, w_zc
+        self.report.weights = {
+            'mae': w_mae, 'volatility': w_vol,
+            'acceleration': w_acc, 'zero_crossings': w_zc,
+        }
 
         particles = [self._create_particle() for _ in range(self.NUM_PARTICLES)]
 
@@ -418,8 +498,9 @@ class NPSO_SSPD_Optimizer:
         print(f"Weights: wMAE={w_mae}, wVol={w_vol}, wAcc={w_acc}, wZC={w_zc}")
         print(f"{'=' * 50}")
 
+        w = c1 = c2 = 0.0
         try:
-            for round_idx in range(self.N_IT):  # 0 .. N_IT-1  (11 total rounds)
+            for round_idx in range(self.N_IT):  # 0 .. N_IT-1
                 if round_idx == 0:
                     print(f"\n{'#' * 50}\n   INITIAL ROUND (0/{self.N_IT - 1})\n{'#' * 50}")
                 else:
@@ -462,6 +543,7 @@ class NPSO_SSPD_Optimizer:
 
         except KeyboardInterrupt:
             print("\n\nInterrupted!")
+            self.report.interrupted = True
             return self.best_global_particle
 
     def cleanup(self):
@@ -471,10 +553,25 @@ class NPSO_SSPD_Optimizer:
         except Exception:
             pass
         try:
-            rclpy.shutdown()
+            if rclpy.ok():
+                rclpy.shutdown()
         except Exception:
             pass
-        subprocess.run(['killall', '-9', 'gimbal_controller'],
-                        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        self._kill_stale_controllers()
         print("Done")
         time.sleep(1.0)
+
+
+def _sign_no_zero(x: np.ndarray) -> np.ndarray:
+    """Sign of x with exact zeros carried forward from the previous sample."""
+    s = np.sign(np.asarray(x, dtype=float))
+    if s.size == 0:
+        return s
+    zeros = s == 0
+    if not zeros.any():
+        return s
+    idx = np.where(~zeros, np.arange(s.size), 0)
+    np.maximum.accumulate(idx, out=idx)
+    s = s[idx]
+    s[s == 0] = 1.0  # leading zeros
+    return s
