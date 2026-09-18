@@ -4,7 +4,7 @@
   <name>sspid2</name>
   <version>0.0.0</version>
   <description>Vision-based UAV gimbal tracking with State-Space PD control and multi-objective NPSO tuning.</description>
-  <maintainer email="workingelk@gmail.com">hawkeye</maintainer>
+  <maintainer email="mario.lazzarinisola@study.thws.de">Mario Lazzarini Sola</maintainer>
   <license>MIT</license>
 
   <!-- Core ROS 2 dependencies -->
