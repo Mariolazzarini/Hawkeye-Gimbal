@@ -1,7 +1,15 @@
 # distance_to_center.py w/enhanced visualization + EMA filter
+#
+# Perception node: YOLOv8 detection + ByteTrack association, publishing the
+# pixel offset of the locked target with respect to the image centre.
+# No depth is estimated anywhere in this node; the "distance" it publishes on
+# /controller/error is a pixel norm kept for debugging only.
+
 import rclpy
 import cv2
 import math
+import os
+import traceback
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Point
@@ -9,34 +17,56 @@ from std_msgs.msg import Float64
 from cv_bridge import CvBridge
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from ultralytics import YOLO
-from pathlib import Path
-import numpy as np
 from collections import deque
 from ament_index_python.packages import get_package_share_directory
-import os
 
 
 class YoloNode(Node):
     def __init__(self):
         super().__init__('yolov8_detector')
-        config_dir = os.path.join(get_package_share_directory('sspid2'), 'config')
 
-        qos_profile = QoSProfile(
+        # FIX: this used to be a local variable of __init__ while
+        # listener_callback referenced it, raising NameError on every frame.
+        # The exception was swallowed by the broad `except Exception` below,
+        # so the node appeared to run while publishing nothing at all.
+        self.config_dir = os.path.join(get_package_share_directory('sspid2'), 'config')
+        self.tracker_cfg = os.path.join(self.config_dir, 'custom_tracker.yaml')
+
+        # ---------------- ROS PARAMETERS ----------------
+        # show_debug is a parameter so that long unattended NPSO runs can be
+        # executed headless without editing the source.
+        self.declare_parameter('show_debug', True)
+        self.declare_parameter('ema_alpha', 0.28)
+        self.declare_parameter('process_every_n_frames', 1)
+        self.SHOW_DEBUG = bool(self.get_parameter('show_debug').value)
+        self.EMA_ALPHA = float(self.get_parameter('ema_alpha').value)
+        self.PROCESS_EVERY_N_FRAMES = int(self.get_parameter('process_every_n_frames').value)
+
+        # Images are high-rate and the consumer (YOLOv8m) is slow: a RELIABLE
+        # subscription builds up a queue and adds latency directly inside the
+        # control loop, so the image stream is BEST_EFFORT.
+        image_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=1
+        )
+        pub_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
             depth=10
         )
 
-        self.sub = self.create_subscription(Image, '/rgb', self.listener_callback, qos_profile)
-        self.pub = self.create_publisher(Point, '/target_coord', qos_profile)
-        self.pub_error_raro = self.create_publisher(Float64, '/controller/error', qos_profile)
+        self.sub = self.create_subscription(Image, '/rgb', self.listener_callback, image_qos)
+        self.pub = self.create_publisher(Point, '/target_coord', pub_qos)
+        self.pub_target_distance = self.create_publisher(Float64, '/controller/error', pub_qos)
 
         # ---------------- METRICS PUBLISHERS ----------------
-        self.pub_target_availability = self.create_publisher(Float64, '/metrics/target_availability', qos_profile)
-        self.pub_fps_60s = self.create_publisher(Float64, '/metrics/fps_60s', qos_profile)
-        self.pub_inter_frame_dt = self.create_publisher(Float64, '/metrics/inter_frame_dt', qos_profile)
-        self.pub_target_confidence = self.create_publisher(Float64, '/metrics/target_confidence', qos_profile)
-        self.pub_id_switch_event = self.create_publisher(Float64, '/metrics/id_switch_event', qos_profile)
+        # Diagnostics only; the evaluator does not subscribe to these.
+        self.pub_target_availability = self.create_publisher(Float64, '/metrics/target_availability', pub_qos)
+        self.pub_fps_60s = self.create_publisher(Float64, '/metrics/fps_60s', pub_qos)
+        self.pub_inter_frame_dt = self.create_publisher(Float64, '/metrics/inter_frame_dt', pub_qos)
+        self.pub_target_confidence = self.create_publisher(Float64, '/metrics/target_confidence', pub_qos)
+        self.pub_id_switch_event = self.create_publisher(Float64, '/metrics/id_switch_event', pub_qos)
 
         # ---------------- METRICS STATE ----------------
         self._last_frame_time_sec = None
@@ -47,12 +77,10 @@ class YoloNode(Node):
         self.bridge = CvBridge()
 
         # YOLO model
-        self.model = YOLO(os.path.join(config_dir, "yolov8m.pt"))
+        self.model = YOLO(os.path.join(self.config_dir, 'yolov8m.pt'))
         # ---- SPEED / RESOLUTION CONTROL ----
         self.TARGET_WIDTH = 640
-        self.PROCESS_EVERY_N_FRAMES = 1
         self.frame_skip_counter = 0
-        self.SHOW_DEBUG = True
 
         # ---------------- VISUAL STYLE ----------------
         self.VIZ_LINE_THICKNESS = 1
@@ -78,10 +106,18 @@ class YoloNode(Node):
         self.REID_DISTANCE_LIMIT = 150
 
         # --- EMA FILTER ---
-        self.EMA_ALPHA = 0.28                # weight for newest measurement
+        # NOTE: this low-pass sits INSIDE the control loop. At 30 fps and
+        # alpha = 0.28 it adds roughly (1 - alpha) / alpha ~ 2.6 frames ~ 86 ms
+        # of lag, which the controller gains are implicitly tuned around. It
+        # must be reported alongside any tuning result.
         self._filtered_center = None         # (fx, fy) smoothed center in 640px coords
 
         self.available_ids = []
+
+        self.get_logger().info(
+            f'Perception node ready | config={self.config_dir} | '
+            f'show_debug={self.SHOW_DEBUG} | ema_alpha={self.EMA_ALPHA}'
+        )
 
     # ------------------------------------------------------------
     # Helper: Exponential Moving Average for center coordinates
@@ -166,7 +202,7 @@ class YoloNode(Node):
         self.pub.publish(pt)
         msg = Float64()
         msg.data = 0.0
-        self.pub_error_raro.publish(msg)
+        self.pub_target_distance.publish(msg)
 
     def _resize_to_target_width(self, frame):
         orig_h, orig_w = frame.shape[:2]
@@ -198,8 +234,11 @@ class YoloNode(Node):
             cutoff = now_sec - self._fps_window_sec
             while self._frame_times_60s and self._frame_times_60s[0] < cutoff:
                 self._frame_times_60s.popleft()
+            # Divide by the elapsed span, not by the nominal window, otherwise
+            # the reported FPS is artificially low during the first minute.
+            span = max(1e-6, now_sec - self._frame_times_60s[0])
             fps_msg = Float64()
-            fps_msg.data = float(len(self._frame_times_60s)) / self._fps_window_sec
+            fps_msg.data = float(len(self._frame_times_60s) - 1) / span if len(self._frame_times_60s) > 1 else 0.0
             self.pub_fps_60s.publish(fps_msg)
 
             # ---- FRAME SKIPPING ----
@@ -212,9 +251,8 @@ class YoloNode(Node):
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             frame_proc = self._resize_to_target_width(frame)
 
-            CUSTOM_TRACKER = os.path.join(config_dir, "custom_tracker.yaml")
             results = self.model.track(
-                frame_proc, persist=True, tracker=CUSTOM_TRACKER,
+                frame_proc, persist=True, tracker=self.tracker_cfg,
                 conf=0.35, imgsz=self.TARGET_WIDTH, classes=[0], verbose=False
             )
 
@@ -353,7 +391,9 @@ class YoloNode(Node):
             elif self.available_ids:
                 self.locked_id = self.available_ids[0]
                 self.get_logger().info(f"Auto-locking to ID: {self.locked_id}")
-                # Filter will be initialised on the next frame's detection automatically
+                # No measurement is available for the controller on this frame;
+                # keep it in stabilization instead of leaving it with a stale error.
+                self.publish_no_target()
             else:
                 self.publish_no_target()
                 if self.SHOW_DEBUG and self.OVERLAY_ON:
@@ -405,7 +445,9 @@ class YoloNode(Node):
                 self.handle_keys(key)
 
         except Exception as e:
-            self.get_logger().error(f'Error: {e}')
+            # Log the full traceback: a bare str(e) hid a NameError here for a
+            # long time, since every frame just printed a one-line message.
+            self.get_logger().error(f'Error in listener_callback: {e}\n{traceback.format_exc()}')
 
     # ------------------------------------------------------------
     # publish_target uses the coordinates passed (already filtered)
@@ -422,7 +464,7 @@ class YoloNode(Node):
         self.pub.publish(pt)
         msg = Float64()
         msg.data = float(dist)
-        self.pub_error_raro.publish(msg)
+        self.pub_target_distance.publish(msg)
 
     # ------------------------------------------------------------
     # handle_keys: reset EMA when manually switching ID
@@ -431,9 +473,10 @@ class YoloNode(Node):
         if key == 255:
             return
         if key == ord('q'):
-            rclpy.shutdown()
-            cv2.destroyAllWindows()
-            return
+            # Request shutdown; main() performs the actual teardown.
+            # Calling rclpy.shutdown() from inside a callback while spinning
+            # left the window and the node in an inconsistent state.
+            raise KeyboardInterrupt
         if key == ord('v'):
             self.OVERLAY_ON = not self.OVERLAY_ON
             self.get_logger().info(f"OVERLAY_ON = {self.OVERLAY_ON}")
@@ -477,9 +520,15 @@ class YoloNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = YoloNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cv2.destroyAllWindows()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
