@@ -1,0 +1,82 @@
+# custom_tracker_ultra_stable.yaml
+# Ultra-stable configuration to PREVENT ID changes during fast motion
+# Optimized for gimbal tracking with rapid camera movements
+
+tracker_type: bytetrack
+
+# DETECTION THRESHOLDS - More permissive to keep tracking
+track_high_thresh: 0.20      # Lower = easier to maintain tracking
+track_low_thresh: 0.08       # Very low = keep tracking even with blur
+new_track_thresh: 0.30       # Higher = harder for new IDs to appear
+
+# MEMORY & PERSISTENCE - Much longer memory
+track_buffer: 150            # Keep lost tracks for 150 frames (~3.75s @ 40Hz)
+                             # This is CRITICAL for fast motion
+
+# MATCHING TOLERANCE - More permissive matching
+match_thresh: 0.80           # Lower = more tolerant of position changes
+                             # 0.80 = very permissive (was 0.85)
+
+# GLOBAL MOTION COMPENSATION - ESSENTIAL for camera movement
+gmc_method: sparseOptFlow    # Compensates for camera motion
+                             # This is THE MOST IMPORTANT setting for gimbal
+
+# ADDITIONAL BYTETRACK PARAMETERS
+min_box_area: 150            # Ignore tiny detections (noise)
+fuse_score: True             # Combine confidence + IoU for matching
+
+# PROXIMITY & APPEARANCE (required by code)
+proximity_thresh: 0.8        # Very high = accept large position jumps
+appearance_thresh: 0.20      # Low threshold
+with_reid: False             # ByteTrack doesn't use ReID
+
+# DATASET SPECIFIC
+mot20: False
+
+
+# ============================================================================
+# EXPLANATION OF KEY PARAMETERS FOR YOUR CASE:
+# ============================================================================
+#
+# track_buffer: 150
+# ----------------
+# This is the MOST IMPORTANT parameter for your case.
+# When an ID is lost, ByteTrack keeps it in memory for 150 frames.
+# At 40Hz, this means 3.75 seconds of memory.
+# During fast camera motion, the human might temporarily disappear or
+# not get a confidence score above track_low_thresh. This buffer prevents
+# immediately creating a new ID when the human reappears.
+#
+# match_thresh: 0.80
+# ------------------
+# Lower = more permissive matching between frames.
+# During fast motion, the human's position can change dramatically.
+# 0.80 means ByteTrack will accept matches even if IoU is relatively low.
+#
+# gmc_method: sparseOptFlow
+# -------------------------
+# This is CRITICAL. It estimates the camera's motion between frames and
+# compensates for it. Without this, fast camera motion makes ByteTrack
+# think everything moved, causing ID switches.
+#
+# track_low_thresh: 0.08
+# ----------------------
+# Very low threshold. Even if YOLO's confidence drops (due to motion blur),
+# ByteTrack will continue tracking. This prevents losing the ID during
+# brief moments of low confidence.
+#
+# new_track_thresh: 0.30
+# ----------------------
+# Higher threshold for NEW tracks. This makes it harder for a new ID to
+# appear, preferring to match with existing tracked objects instead.
+#
+# ============================================================================
+
+
+# ALTERNATIVE CONFIGURATION: Even MORE stable (if still having issues)
+# Uncomment these if you still see ID switches:
+
+# track_buffer: 200           # Even longer memory (5 seconds!)
+# match_thresh: 0.70          # Even more permissive matching
+# track_low_thresh: 0.05      # Track even with very low confidence
+# proximity_thresh: 0.9       # Accept very large position jumps
