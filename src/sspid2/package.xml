@@ -3,12 +3,21 @@
 <package format="3">
   <name>sspid2</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Vision-based UAV gimbal tracking with State-Space PD control and multi-objective NPSO tuning.</description>
   <maintainer email="workingelk@gmail.com">hawkeye</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
+  <!-- Core ROS 2 dependencies -->
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>cv_bridge</depend>
+
+  <!-- Python dependencies (ROS packages) -->
+  <depend>python3-numpy</depend>
+  <depend>python3-opencv</depend>
+  <depend>ament_index_python</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
