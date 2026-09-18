@@ -9,6 +9,7 @@ from std_msgs.msg import Float64
 from cv_bridge import CvBridge
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from ultralytics import YOLO
+from pathlib import Path
 import numpy as np
 from collections import deque
 
@@ -43,7 +44,7 @@ class YoloNode(Node):
         self.bridge = CvBridge()
 
         # YOLO model
-        self.model = YOLO('config/yolov8m.pt')
+        self.model = YOLO(str(Path(__file__).resolve().parent / "config" / "yolov8m.pt"))
 
         # ---- SPEED / RESOLUTION CONTROL ----
         self.TARGET_WIDTH = 640
@@ -209,7 +210,7 @@ class YoloNode(Node):
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             frame_proc = self._resize_to_target_width(frame)
 
-            CUSTOM_TRACKER = "config/custom_tracker.yaml"
+            CUSTOM_TRACKER = str(Path(__file__).resolve().parent / "config" / "custom_tracker.yaml")
             results = self.model.track(
                 frame_proc, persist=True, tracker=CUSTOM_TRACKER,
                 conf=0.35, imgsz=self.TARGET_WIDTH, classes=[0], verbose=False
