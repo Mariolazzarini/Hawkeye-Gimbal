@@ -3,17 +3,17 @@
 An end-to-end ROS 2 and Isaac Sim framework for vision-based UAV gimbal tracking, integrating YOLOv8-ByteTrack perception, State-Space PD control, and multi-objective NPSO gain tuning.
 
 ## Table of Contents
-- [Features](#-features)
-- [Prerequisites](#-prerequisites)
-- [Installation](#-installation)
-- [Usage](#-usage)
-- [Repository Structure](#-repository-structure)
-- [Configuration](#-configuration)
-- [Data and Results](#-data-and-results)
-- [Citation](#-citation)
-- [Authors](#-authors)
-- [License](#-license)
-- [Acknowledgments](#-acknowledgments)
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Repository Structure](#repository-structure)
+- [Configuration](#configuration)
+- [Data and Results](#data-and-results)
+- [Citation](#citation)
+- [Authors](#authors)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
 
 ## Features
 - **YOLOv8 + ByteTrack** for robust human target detection and tracking.
