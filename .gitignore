@@ -18,14 +18,11 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
 develop-eggs/
 dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -33,6 +30,9 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+# Anchored so that a future source directory named lib/ is not silently hidden
+/lib/
+/lib64/
 
 # Virtual environments
 venv/
@@ -45,26 +45,32 @@ venv.bak/
 # ==========================================
 # Data & Results (Heavy files)
 # ==========================================
-# Ignore raw and processed data if not using Git LFS
-data/raw/
-data/processed/
-data/results/
+# Ignore the contents, but keep the directory structure the README documents
+# and the scripts expect (tools/evaluator.py and optimization/run_npsoSSPID.py
+# write here).
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/results/*
+!data/results/.gitkeep
 
-# Ignore common data file extensions
-*.bag
-*.db3
-*.mcap
-*.csv
-*.json
-*.xlsx
-*.h5
-*.pkl
-*.parquet
+# Common data file extensions, scoped to data/ so that configuration files
+# elsewhere in the tree are not ignored by accident.
+data/**/*.bag
+data/**/*.db3
+data/**/*.mcap
+data/**/*.csv
+data/**/*.json
+data/**/*.xlsx
+data/**/*.h5
+data/**/*.pkl
+data/**/*.parquet
 
 # ==========================================
 # YOLO / Model Weights (Heavy files)
 # ==========================================
-# Ignore model weight files - document download links in README instead
+# Not tracked; see the Installation section of the README for the download link.
 *.pt
 *.pth
 *.onnx
