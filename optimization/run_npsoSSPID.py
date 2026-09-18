@@ -17,14 +17,14 @@ from npsoSSPID import NPSO_SSPD_Optimizer, PARTICLE_DURATION
 REPORT_DIR = Path(__file__).resolve().parent.parent / "data" / "results"
 
 # Fitness weights (Eq. 27) in the order (w_mae, w_vol, w_acc, w_zc).
-# Verify these against the weights reported in the paper before re-running.
+# These are Table 3 of the paper.
 EXPERIMENTS = {
-    "2": ("MAE only",             (1.0, 0.0, 0.0, 0.0)),
-    "3": ("MAE + Volatility",     (1.0, 1.0, 0.0, 0.0)),
-    "4": ("MAE + Acceleration",   (1.0, 0.0, 1.0, 0.0)),
-    "5": ("MAE + Zero-crossings", (1.0, 0.0, 0.0, 1.0)),
-    "6": ("Multi-objective (equal weights)", (1.0, 1.0, 1.0, 1.0)),
-    "7": ("Multi-objective (reweighted)",    (1.0, 0.5, 0.5, 1.0)),
+    "2": ("MAE",                       (1.0, 0.0, 0.0, 0.0)),
+    "3": ("MAE + Volatility",          (1.0, 1.0, 0.0, 0.0)),
+    "4": ("MAE + Zero-crossings",      (1.0, 0.0, 0.0, 1.0)),
+    "5": ("MAE + Acceleration",        (1.0, 0.0, 1.0, 0.0)),
+    "6": ("Combined (equal weights)",  (1.0, 1.0, 1.0, 1.0)),
+    "7": ("Combined (reweighted)",     (1.0, 0.5, 0.5, 1.0)),
 }
 
 
