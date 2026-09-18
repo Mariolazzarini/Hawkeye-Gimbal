@@ -96,22 +96,22 @@ hawkeye-gimbal/
 │       ├── sspid2/
 │       │   ├── __init__.py
 │       │   ├── controller.py
-│       │   └── distance_to_center.py
-│       ├── config/
-│       │   └── custom_tracker.yaml
-│       └── launch/
-│           └── tracking.launch.py   # (optional)
+│       │   ├── distance_to_center.py
+│       │   └── config/
+│       │       ├── custom_tracker.yaml
+│       │       └── yolov8m.pt         
+│
+├── tools/
+│   └── evaluator.py                   
 │
 ├── optimization/
 │   ├── npsoSSPID.py
 │   └── run_npsoSSPID.py
 │
-├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── results/
-│
-└── notebooks/
+└── data/
+    ├── raw/
+    ├── processed/
+    └── results/
 ```
 
 ## Configuration
@@ -124,6 +124,11 @@ ros2 run sspid2 controller_node --ros-args -p kp_yaw:=10.6 -p kd_yaw:=0.15 ...
 Optimization bounds: Edit npsoSSPID.py to change the search ranges (KP_RANGE, KD_RANGE, OMEGA_RANGE).
 
 ## Data and Results
+### Real-Time Evaluation Tool
+To evaluate tracking performance in real time (without interfering with the control pipeline), run the following in a separate terminal while the ROS 2 nodes are running:
+```bash
+python3 tools/evaluator.py
+```
 Raw and processed data are stored in data/raw/ and data/processed/.
 Optimization reports (JSON) are saved to data/results/. These include the best particle parameters and fitness components.
 If you use Git LFS, you can track large files (e.g., *.pt, *.bag). Otherwise, keep them out of the repository and document their download links.
