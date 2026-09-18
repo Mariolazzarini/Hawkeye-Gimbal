@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Minimal Hawkeye ROS2 evaluator.
+Hawkeye Gimbal evaluator.
 
 Usage:
   python3 hawkeye_evaluator.py                # all metrics
@@ -24,9 +24,9 @@ from rclpy.node import Node
 from rclpy.utilities import remove_ros_args
 from std_msgs.msg import Float64MultiArray
 
-DEFAULT_OUTPUT_ROOT = "/home/hawkeye/ros_hawkeye/robotics_project/ws_new2/SSPID_ws2/evaluation_results"
+DEFAULT_OUTPUT_ROOT = str(Path(__file__).resolve().parent.parent / "data" / "results")
 SINUSOIDAL_DURATION_SEC = 100.0
-STEP_RESPONSE_DURATION_SEC = 5.0 # Initial error = (200, 148) px
+STEP_RESPONSE_DURATION_SEC = 5.0 # Initial error = (200, 150) px
 SETTLING_TOLERANCE_PX = 5.0
 SETTLING_HOLD_SEC = 2.0
 PLOT_UPDATE_SEC = 0.001
