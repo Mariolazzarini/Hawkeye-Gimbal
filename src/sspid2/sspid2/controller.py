@@ -1,5 +1,5 @@
 ###################
-#  controller.py  # 
+#  controller.py  # sspid2
 ###################
 #
 # State-Space PD (SS-PD) gimbal controller.
@@ -27,42 +27,49 @@ from std_msgs.msg import Float64MultiArray, String
 #  parameters (see README). Swap this block with one of the alternatives below
 #  to reproduce a specific experiment.
 #
-#  TODO(authors): confirm the mapping between these blocks and the experiment
-#  numbers in the paper before tagging the release. The labels below are the
-#  ones that were used in the working tree and have NOT been cross-checked
-#  against the published tables.
+#  Values below are Table 3 of the paper (NPSO-tuned parameters and fitness
+#  weights for Experiments 2-7), with w = [w_MAE, w_vol, w_acc, w_zc].
+#
+#  DISCREPANCY TO RESOLVE: for Experiments 6 and 7 the working tree carried
+#  Kp = 8.63482313 / Kd = 0.15000789 and Kp = 10.23482313 / Kd = 0.12000789 /
+#  omega_o = 818.29943956, which differ from Table 3 beyond rounding. The
+#  published table is used here; check the original NPSO reports and correct
+#  whichever source is wrong. Experiments 2-5 matched the table exactly.
 # ============================================================================
 
-# >>> Multi-objective (equal weights, w = [1, 1, 1, 1])
-kp      = 8.63482313
+# >>> Exp. 6 - Combined, equal weights   w = [1, 1, 1, 1]
+kp      = 9.6348
 ki      = 0.0
-kd      = 0.15000789
-omega_o = 600.29943956
+kd      = 0.1508
+omega_o = 600.2994
 
-# ---- Alternative gain sets -------------------------------------------------
+# ---- Alternative gain sets (paper Table 3) ---------------------------------
 #
 # # Debug / smoke-test only (NOT a paper result)
-# kp = 1.0;          ki = 0.0;  kd = 0.1;        omega_o = 100.0
+# kp = 1.0;        ki = 0.0;  kd = 0.1;      omega_o = 100.0
 #
-# # Ziegler-Nichols baseline
-# kp = 11.36;        ki = 0.0;  kd = 0.639;      omega_o = 500.0
+# # Exp. 1 baseline - Ziegler-Nichols (Sec. 6.1). ZN-PD and ZN-SSPD share the
+# # same KP/KD; the SS realization additionally uses omega_o = 2N/Td with
+# # N = 20, giving approximately 632 rad/s.
+# kp = 7.68;       ki = 0.0;  kd = 0.48;     omega_o = 632.0
 #
-# # MAE only                       w = [1, 0, 0, 0]
-# kp = 13.221292;    ki = 0.0;  kd = 0.22545;    omega_o = 487.1265
+# # Exp. 2 - MAE only                    w = [1, 0,   0,   0]
+# kp = 13.2213;    ki = 0.0;  kd = 0.2255;   omega_o = 487.1265
 #
-# # MAE + Volatility               w = [1, 1, 0, 0]
-# kp = 12.362949;    ki = 0.0;  kd = 0.122547;   omega_o = 932.0433
+# # Exp. 3 - MAE + Volatility            w = [1, 1,   0,   0]
+# kp = 12.3629;    ki = 0.0;  kd = 0.1225;   omega_o = 932.0433
 #
-# # MAE + Zero-crossings           w = [1, 0, 0, 1]
-# kp = 12.867482;    ki = 0.0;  kd = 0.135862;   omega_o = 956.2599
+# # Exp. 4 - MAE + Zero-crossings        w = [1, 0,   0,   1]
+# kp = 12.8675;    ki = 0.0;  kd = 0.1359;   omega_o = 956.2599
 #
-# # MAE + Acceleration             w = [1, 0, 1, 0]
-# #   (this set was previously labelled "MAE + Jerk"; the quantity is the mean
-# #    absolute SECOND difference of the radial error, i.e. an acceleration)
-# kp = 12.032110;    ki = 0.0;  kd = 0.147699;   omega_o = 901.5414
+# # Exp. 5 - MAE + Acceleration          w = [1, 0,   1,   0]
+# #   (this set was previously labelled "MAE + Jerk"; per Eq. 24 the quantity
+# #    is the mean absolute SECOND difference of the radial error, i.e. an
+# #    acceleration-like term)
+# kp = 12.0321;    ki = 0.0;  kd = 0.1477;   omega_o = 901.5414
 #
-# # Multi-objective, reweighted    w = [1, 0.5, 0.5, 1]
-# kp = 10.23482313;  ki = 0.0;  kd = 0.12000789; omega_o = 818.29943956
+# # Exp. 7 - Combined, reweighted        w = [1, 0.5, 0.5, 1]
+# kp = 10.2877;    ki = 0.0;  kd = 0.1202;   omega_o = 818.4926
 # ----------------------------------------------------------------------------
 
 # ---- Configuration Parameters ----------------------------------------------
@@ -74,17 +81,25 @@ omega_o = 600.29943956
 # here as well -- the geometry is currently duplicated in two places.
 FRAME_WIDTH    = 640.0
 FRAME_HEIGHT   = 360.0
-FOCAL_LENGTH   = 18.1476   # mm, USD `focalLength`
-HORIZ_APERTURE = 20.955    # mm, USD `horizontalAperture`
+FOCAL_LENGTH   = 18.1476   # mm, f in Eq. (6), USD `focalLength`
+HORIZ_APERTURE = 20.955    # mm, A_x in Sec. 3.4, USD `horizontalAperture`
 
-# Isaac Sim / USD derive the vertical field of view from the aspect ratio of
-# the rendered image. The USD *default* verticalAperture (15.2908 mm) belongs
-# to a ~4:3 sensor and does not describe a 640x360 (16:9) render: using it made
-# the pitch angular error ~30 % larger than the yaw one for the same pixel
-# offset, even though NPSO assigns identical gains to both axes.
-VERT_APERTURE  = HORIZ_APERTURE * (FRAME_HEIGHT / FRAME_WIDTH)   # = 11.787 mm
-# To reproduce the original (anisotropic) scaling, replace the line above with:
-#   VERT_APERTURE = 15.2908
+# A_y in Sec. 3.4. This is the USD *default* verticalAperture, and it is the
+# value used to produce every result in the paper, so it is kept as the default
+# in order to reproduce them.
+#
+# KNOWN ISSUE (see README, Known Limitations): 15.2908 mm describes a ~4:3
+# sensor, while the images are rendered at 640x360 (16:9). Isaac Sim derives
+# the vertical field of view from the aspect ratio, so the consistent value
+# would be A_y = A_x * H / W = 11.787 mm. With 15.2908 the vertical pixel pitch
+# s_y is ~30 % larger than s_x, which means the pitch axis receives a larger
+# angular error than the yaw axis for the same pixel offset, even though the
+# NPSO search assigns a single shared parameter vector to both axes (Eq. 11).
+# This is a plausible contributor to the yaw/pitch asymmetry visible in the
+# Scenario 2 traces. To use the geometrically consistent value instead:
+#   VERT_APERTURE = HORIZ_APERTURE * (FRAME_HEIGHT / FRAME_WIDTH)
+# Note that doing so invalidates a direct comparison with the published tables.
+VERT_APERTURE  = 15.2908
 
 CONTROL_PERIOD = 0.001   # s, nominal control period (dt used by the observer)
 MAX_VEL_TRACK  = 1.5     # rad/s
@@ -120,10 +135,15 @@ class SSPID:
         # Estimated state vector: [error_dot, error, integral_error]
         self.x_hat = np.zeros(3)
 
-        # Input that was ACTUALLY applied to the plant on the previous sample.
-        # The observer must be driven with the applied (saturated) input, not
-        # with the raw control law output, otherwise the estimates diverge
-        # while the command is saturated.
+        # u[k-1] in Eq. (16) / Eq. (18): the control action produced on the
+        # previous sample by Eq. (20).
+        #
+        # By default this is the raw control-law output, exactly as the paper
+        # defines it. Calling set_applied_input() with the saturated command
+        # instead gives the observer the input the plant really received, which
+        # prevents the estimates from drifting while the rate command is
+        # saturated at MAX_VEL_TRACK. That is a deviation from Eq. (16) and is
+        # therefore opt-in (see the observer_uses_saturated_input parameter).
         self.u_prev = 0.0
 
         # Observer dynamics matrix
@@ -160,15 +180,14 @@ class SSPID:
         # Control action is computed from the estimated states.
         u = -self._Ko_dot_xhat()
 
-        # Provisional: the caller must call set_applied_input() with the
-        # saturated command so the next observer update sees the real input.
+        # u[k] becomes u[k-1] for the next observer update (Eq. 16).
         self.u_prev = u
         return u
 
     # ------------------------------------------------------------------
     def set_applied_input(self, u_applied: float):
-        # Report the command that was really sent to the gimbal (after
-        # saturation) so the observer stays consistent with the plant.
+        # Optional anti-windup: overwrite u[k-1] with the command that was
+        # really sent to the gimbal (after saturation). Deviates from Eq. (16).
         self.u_prev = float(u_applied)
 
     def _Ko_dot_xhat(self) -> float:  # multiplying Ko with x_hat
@@ -189,6 +208,9 @@ class GimbalControllerNode(Node):
         self.declare_parameter('ki_pitch',          ki)
         self.declare_parameter('kd_pitch',          kd)
         self.declare_parameter('omega_o_pitch',     omega_o)
+        # Opt-in anti-windup: feed the saturated command back into the
+        # observer. False reproduces Eq. (16) of the paper literally.
+        self.declare_parameter('observer_uses_saturated_input', False)
 
         # Read parameter values.
         _kp_y   = self.get_parameter('kp_yaw').value
@@ -199,6 +221,14 @@ class GimbalControllerNode(Node):
         _ki_p   = self.get_parameter('ki_pitch').value
         _kd_p   = self.get_parameter('kd_pitch').value
         _oo_p   = self.get_parameter('omega_o_pitch').value
+        self.observer_uses_saturated_input = bool(
+            self.get_parameter('observer_uses_saturated_input').value)
+        if self.observer_uses_saturated_input:
+            self.get_logger().warn(
+                'observer_uses_saturated_input is enabled: the observer is driven '
+                'with the saturated command instead of u[k-1] as defined in Eq. (16). '
+                'Results will not be directly comparable with the published tables.'
+            )
 
         # The published results use a PD law; warn loudly if that is not the case.
         if _ki_y != 0.0 or _ki_p != 0.0:
@@ -337,11 +367,11 @@ class GimbalControllerNode(Node):
         vel_yaw   = self.sspid_soft_yaw.compute(error_yaw)
         vel_pitch = self.sspid_soft_pitch.compute(error_pitch)
 
-        # Saturate, then tell each observer what was really applied.
         vel_yaw   = min(MAX_VEL_STAB, max(-MAX_VEL_STAB, vel_yaw))
         vel_pitch = min(MAX_VEL_STAB, max(-MAX_VEL_STAB, vel_pitch))
-        self.sspid_soft_yaw.set_applied_input(vel_yaw)
-        self.sspid_soft_pitch.set_applied_input(vel_pitch)
+        if self.observer_uses_saturated_input:
+            self.sspid_soft_yaw.set_applied_input(vel_yaw)
+            self.sspid_soft_pitch.set_applied_input(vel_pitch)
 
         # Publish bounded angular velocities.
         # Convention of /cam_vel: angular.x = pitch rate, angular.y = yaw rate.
@@ -373,9 +403,9 @@ class GimbalControllerNode(Node):
         vel_yaw   = min(MAX_VEL_TRACK, max(-MAX_VEL_TRACK, self.sspid_yaw.compute(yaw_error)))
         vel_pitch = min(MAX_VEL_TRACK, max(-MAX_VEL_TRACK, self.sspid_pitch.compute(pitch_error)))
 
-        # Close the loop around the observer with the saturated command.
-        self.sspid_yaw.set_applied_input(vel_yaw)
-        self.sspid_pitch.set_applied_input(vel_pitch)
+        if self.observer_uses_saturated_input:
+            self.sspid_yaw.set_applied_input(vel_yaw)
+            self.sspid_pitch.set_applied_input(vel_pitch)
 
         # Publish bounded angular velocities.
         msg = Twist()
@@ -387,17 +417,23 @@ class GimbalControllerNode(Node):
         # NOTE: /pid_log is only published in tracking mode, so every metric
         # derived from it is scoped to the samples in which a target was being
         # tracked. See the "Data and Results" section of the README.
+        # Layout (indices 0-8 are unchanged with respect to earlier recordings,
+        # except that 6 and 7 now carry the SS-PD observer derivative estimate
+        # x_bar_1 instead of the unused integral state):
         log_msg = Float64MultiArray()
         log_msg.data = [
-            float(self.error[0]),                         # Pixel error x [px]
-            float(self.error[1]),                         # Pixel error y [px]
-            float(yaw_error),                             # Angular error yaw [rad]
-            float(pitch_error),                           # Angular error pitch [rad]
-            float(vel_yaw),                               # Velocity yaw [rad/s]
-            float(vel_pitch),                             # Velocity pitch [rad/s]
-            float(self.sspid_yaw.x_hat[2]),               # Observer integral state yaw
-            float(self.sspid_pitch.x_hat[2]),             # Observer integral state pitch
-            float(self.error[2]),                         # Target detected flag
+            float(self.error[0]),                         # 0  Pixel error e_x [px]      Eq. (5)
+            float(self.error[1]),                         # 1  Pixel error e_y [px]      Eq. (5)
+            float(yaw_error),                             # 2  Angular error yaw [rad]   Eq. (6)
+            float(pitch_error),                           # 3  Angular error pitch [rad] Eq. (6)
+            float(vel_yaw),                               # 4  Controller output u_psi [rad/s]
+            float(vel_pitch),                             # 5  Controller output u_theta [rad/s]
+            float(self.sspid_yaw.x_hat[0]),               # 6  Observer x_bar_1 yaw      Eq. (13)
+            float(self.sspid_pitch.x_hat[0]),             # 7  Observer x_bar_1 pitch    Eq. (13)
+            float(self.error[2]),                         # 8  Target validity flag nu_t
+            float(self.sspid_yaw.x_hat[1]),               # 9  Observer x_bar_2 yaw      Eq. (13)
+            float(self.sspid_pitch.x_hat[1]),             # 10 Observer x_bar_2 pitch    Eq. (13)
+            float(math.hypot(self.error[0], self.error[1])),  # 11 Radial error e_p [px]
         ]
         self.log_publisher.publish(log_msg)
 
