@@ -2,17 +2,18 @@
 #  controller.py  # SSPID2 
 ###################
 
+# Standard ROS 2 and numerical imports
 import rclpy, math, time
 import numpy as np
 from rclpy.node import Node
 from geometry_msgs.msg import Point, Twist, Vector3 
 from std_msgs.msg import Float64MultiArray, String
 
-# Multi-objective
-kp      = 10.23482313;   
-ki      = 0.000000000;   
-kd      = 0.120007890;   
-omega_o = 818.29943956;   
+# Test
+kp      = 1.0;   
+ki      = 0.0;   
+kd      = 0.1;   
+omega_o = 100.0; 
 
 # # Multi-objective-2
 # kp      = 10.23482313;   
@@ -21,9 +22,9 @@ omega_o = 818.29943956;
 # omega_o = 818.29943956;   
 
 # # Ziegler-Nichols
-# kp = 11.36
-# ki = 0.0
-# kd = 0.639  
+# kp      = 11.36
+# ki      = 0.0
+# kd      = 0.639  
 # omega_o = 500.0;      
 
 # # only-MAE
@@ -57,6 +58,7 @@ omega_o = 818.29943956;
 # omega_o = 600.29943956;   
 
 # ---- Configuration Parameters -------------------------------
+# Camera and gimbal limits used to convert pixel error to angular error.
 FRAME_WIDTH    = 640.0 
 FRAME_HEIGHT   = 360.0
 FOCAL_LENGTH   = 18.1476
@@ -68,6 +70,8 @@ TARGET_TIMEOUT = 2.0     # time before confirming target loss
 # -------------------------------------------------------------
 
 class SSPID:
+    # State-space PID (SS-PID) with an observer-based realization.
+    # It estimates the error, its derivative, and its integral.
     # ------------------------------------------------------------------
     def __init__(self, kp: float, ki: float, kd: float,
                  omega_o: float, dt: float = 0.001):
@@ -76,37 +80,48 @@ class SSPID:
         self.kd = kd
         self.dt = dt
 
+        # Observer bandwidth determines the observer coefficients.
         self.omega_o = omega_o
         self.beta1 = omega_o ** 2   # Lo[0]
         self.beta2 = 2.0 * omega_o  # Lo[1]
 
+        # Estimated state vector: [error_dot, error, integral_error]
         self.x_hat = np.zeros(3)
 
+        # Observer dynamics matrix
         self._A_obs = np.array([
             [0.0,     -self.beta1, 0.0],
             [1.0,     -self.beta2, 0.0],
             [0.0,     -1.0,        0.0]
         ])
+        # Observer input vector
         self._Be = np.array([1.0, 0.0, 0.0])
+        # Observer output injection vector
         self._Lo = np.array([self.beta1, self.beta2, 1.0])
 
     # ------------------------------------------------------------------
     def reset(self):
+        # Reset the observer state to zero.
         self.x_hat = np.zeros(3)
 
     # ------------------------------------------------------------------
     def compute(self, error: float) -> float:
+        # Measured output for the observer.
         y = -error  
         # ---- Observer ----
+        # Use the previous control action in the observer update.
         u_prev = self._Ko_dot_xhat()  
+        # Euler integration of the observer dynamics.
         x_hat_dot = (self._A_obs @ self.x_hat + self._Be * u_prev + self._Lo * y)
         self.x_hat = self.x_hat + self.dt * x_hat_dot
         # ---- Control law ----
+        # Control action is computed from the estimated states.
         u = -self._Ko_dot_xhat()  
 
         return u 
 
     def _Ko_dot_xhat(self) -> float: # multiplying Ko with x_hat
+        # Combine derivative, proportional, and integral gains.
         return (self.kd*self.x_hat[0] + self.kp*self.x_hat[1] + self.ki*self.x_hat[2])
 
 
@@ -114,6 +129,7 @@ class GimbalControllerNode(Node):
     def __init__(self):
         super().__init__('gimbal_controller')
 
+        # Declare ROS 2 parameters for yaw and pitch gains.
         self.declare_parameter('kp_yaw',            kp)
         self.declare_parameter('ki_yaw',            ki)
         self.declare_parameter('kd_yaw',            kd)
@@ -123,6 +139,7 @@ class GimbalControllerNode(Node):
         self.declare_parameter('kd_pitch',          kd)
         self.declare_parameter('omega_o_pitch',     omega_o)
 
+        # Read parameter values.
         _kp_y   = self.get_parameter('kp_yaw').value
         _ki_y   = self.get_parameter('ki_yaw').value
         _kd_y   = self.get_parameter('kd_yaw').value
@@ -132,39 +149,49 @@ class GimbalControllerNode(Node):
         _kd_p   = self.get_parameter('kd_pitch').value
         _oo_p   = self.get_parameter('omega_o_pitch').value
 
+        # Create SS-PID controllers for tracking mode.
         self.sspid_yaw   = SSPID(kp=_kp_y, ki=_ki_y, kd=_kd_y, omega_o=_oo_y)
         self.sspid_pitch = SSPID(kp=_kp_p, ki=_ki_p, kd=_kd_p, omega_o=_oo_p)
 
+        # Create softer SS-PID controllers for stabilization mode.
         self.sspid_soft_yaw   = SSPID(kp=8.0, ki=0.0, kd=0.1, omega_o=10.0)
         self.sspid_soft_pitch = SSPID(kp=8.0, ki=0.0, kd=0.1, omega_o=10.0)
 
+        # State variables.
         self.error = [0.0, 0.0, 0.0]
         self.current_orientation = [0.0, 0.0, 0.0]
         self.target_orientation  = [90.0, 0.0, 0.0]
         self.default_orientation = [90.0, 0.0, 0.0]
         self.last_target_time = None
 
+        # Subscribers.
         self.create_subscription(Point,   '/target_coord',        self.target_callback,      10)
         self.create_subscription(Vector3, '/current_orientation', self.orientation_callback, 10)
+
+        # Publishers.
         self.publisher     = self.create_publisher(Twist,             '/cam_vel', 10)
         self.log_publisher = self.create_publisher(Float64MultiArray, '/pid_log', 10)
         self.logger_info   = self.create_publisher(String,            '/control', 10)
 
+        # Main control loop at 1 kHz.
         self.create_timer(0.001, self.main_loop)
         self._log_counter = 0
 
     # ------------------------------------------------------------------
     def target_callback(self, msg):
+        # Pixel error and target-detection flag.
         self.error[0] = msg.x
         self.error[1] = msg.y
         self.error[2] = msg.z
 
     def orientation_callback(self, msg):
+        # Current gimbal orientation.
         self.current_orientation[0] = msg.x
         self.current_orientation[1] = msg.y
         self.current_orientation[2] = msg.z
 
     def pixel_to_angle(self, error_x, error_y):
+        # Convert pixel error to angular line-of-sight error.
         pixel_size_x = HORIZ_APERTURE / FRAME_WIDTH
         pixel_size_y = VERT_APERTURE  / FRAME_HEIGHT
         sensor_error_x = error_x * pixel_size_x
@@ -175,20 +202,21 @@ class GimbalControllerNode(Node):
 
     # ------------------------------------------------------------------
     def main_loop(self):
+        # If no target is detected (flag = 0), run stabilization mode.
         if abs(self.error[2]) == 0.0:   # No target detected
             current_time = time.time()
             if self.last_target_time is not None:
-                if (current_time - self.last_target_time) > TARGET_TIMEOUT: # Maintain last target-detected orientation for a couple seconds before switching back 
-                                                                            # to default orientation, to avoid rapid moving back and forth when target is lost for a decimal of seconds.
+                # After a timeout, return to the default orientation.
+                if (current_time - self.last_target_time) > TARGET_TIMEOUT:
                     self.target_orientation = self.default_orientation.copy()
                     self.last_target_time = None
                     self.sspid_yaw.reset()
                     self.sspid_pitch.reset()
             self.stabilization_loop()
         else:                           # Target detected
-            self.target_orientation[0] = self.current_orientation[0] # The target orientation is updated to the current orientation every time the target is in camera, 
-            self.target_orientation[2] = self.current_orientation[2] # so that when the target is lost, it will maintain the last orientation instead of snapping back to default.
-                                                                     # to avoid rapid changes when target is lost for just a decimal of a second.
+            # Keep the last known orientation while the target is visible.
+            self.target_orientation[0] = self.current_orientation[0]
+            self.target_orientation[2] = self.current_orientation[2]
             self.last_target_time = time.time()
             self.sspid_soft_yaw.reset()
             self.sspid_soft_pitch.reset()
@@ -196,17 +224,21 @@ class GimbalControllerNode(Node):
 
     # ------------------------------------------------------------------
     def stabilization_loop(self):
+        # Compute angular error between target and current orientation.
         error_pitch = math.radians(self.target_orientation[0] - self.current_orientation[0])
         error_yaw   = math.radians(self.target_orientation[2] - self.current_orientation[2])
 
+        # Soft SS-PID controllers for smooth stabilization.
         vel_yaw   = self.sspid_soft_yaw.compute(error_yaw)
         vel_pitch = self.sspid_soft_pitch.compute(error_pitch)
 
+        # Publish bounded angular velocities.
         msg = Twist()
         msg.angular.x =  min(MAX_VEL_STAB, max(-MAX_VEL_STAB, vel_pitch))
         msg.angular.y =  min(MAX_VEL_STAB, max(-MAX_VEL_STAB, vel_yaw))
         self.publisher.publish(msg)
 
+        # Log status periodically.
         self._log_counter += 1
         if self._log_counter % 100 == 0:
             self.get_logger().info(
@@ -219,6 +251,7 @@ class GimbalControllerNode(Node):
                 f'\n ---------------------------------------------------\n'
             )
 
+        # Publish human-readable status on /control.
         msg_text = ( # use <<ros2 topic echo /control --field data >> to see these logs
             f'\n\nOffset:   ({self.error[0]:.3f}, {self.error[1]:.3f}) px'
             f'\nVelocity:   ({vel_pitch:.3f}, {vel_yaw:.3f}) rad/s'
@@ -230,15 +263,20 @@ class GimbalControllerNode(Node):
 
     # ------------------------------------------------------------------
     def control_loop(self):
+        # Convert pixel error to angular error.
         yaw_error, pitch_error = self.pixel_to_angle(self.error[0], self.error[1])
+
+        # SS-PID control with velocity saturation.
         vel_yaw   = min(MAX_VEL_TRACK, max(-MAX_VEL_TRACK, self.sspid_yaw.compute(yaw_error)))
         vel_pitch = min(MAX_VEL_TRACK, max(-MAX_VEL_TRACK, self.sspid_pitch.compute(pitch_error)))
 
+        # Publish bounded angular velocities.
         msg = Twist()
         msg.angular.x =  vel_pitch
         msg.angular.y = -vel_yaw
         self.publisher.publish(msg)
 
+        # Publish numerical log for the evaluator.
         log_msg = Float64MultiArray()
         log_msg.data = [
             float(self.error[0]),                         # Pixel error x [px]
@@ -253,6 +291,7 @@ class GimbalControllerNode(Node):
         ]
         self.log_publisher.publish(log_msg)
 
+        # Log status periodically.
         self._log_counter += 1
         if self._log_counter % 100 == 0:
             self.get_logger().info(
@@ -262,6 +301,7 @@ class GimbalControllerNode(Node):
                 f'\n   Parameters:(Kp:{self.sspid_yaw.kp:.3f}, Ki:{self.sspid_yaw.ki:.1f}, Kd:{self.sspid_yaw.kd:.4f}, ωo:{self.sspid_yaw.omega_o:.1f})\n'
             )
 
+        # Publish human-readable status on /control.
         msg_text = ( # use <<ros2 topic echo /control --field data >> to see these logs
             f'\n\nOffset:   ({self.error[0]:.3f}, {self.error[1]:.3f}) px'
             f'\nVelocity:   ({vel_pitch:.3f}, {vel_yaw:.3f}) rad/s'
@@ -272,6 +312,7 @@ class GimbalControllerNode(Node):
         self.logger_info.publish(msg)
 
 def main(args=None):
+    # Standard ROS 2 node startup.
     rclpy.init(args=args)
     node = GimbalControllerNode()
     try:
