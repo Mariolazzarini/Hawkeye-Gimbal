@@ -30,12 +30,14 @@ PARTICLE_DURATION = SETTLE_BEFORE_S + EVAL_DURATION_S + CLEANUP_AFTER_S
 CONTROLLER_EXECUTABLE = 'controller_node'
 
 # ─── Search space Omega and velocity limits (Eq. 32) ───────────────────────
+# KP and KD bracket the Ziegler-Nichols baseline (KP ~ 7.68, KD ~ 0.48);
+# KD = 0 lets the search admit purely proportional action (Sec. 4.3).
 KP_RANGE = (7.0, 14.0)
 KD_RANGE = (0.0, 0.70)
-# Forward-Euler discretisation of the observer double pole at -omega_o is
-# stable only for omega_o * Ts < 2, i.e. omega_o < 2000 rad/s at Ts = 1 ms.
-# Values close to that bound are numerically poorly conditioned; report the
-# search range together with Ts in any published result.
+# omega_o brackets the ZN-SSPD value (~632 rad/s, from omega_o = 2N/Td with
+# N = 20). The upper bound is half the explicit-Euler stability limit
+# 2/Ts = 2000 rad/s at Ts = 1 ms; the lower bound avoids excessively slow
+# state estimation.
 OMEGA_RANGE = (20.0, 1000.0)
 
 V_MAX = np.array([0.7, 0.07, 100.0])   # componentwise |v| <= vmax (Eq. 29)
@@ -75,8 +77,11 @@ class SSPD:
     implementations stay verifiably consistent, and so the controller
     can be exercised/unit-tested standalone if desired.
 
-    Like controller.py, the observer is driven with the input that is
-    actually applied to the plant, i.e. after saturation at u_max.
+    As in Eq. (16), the observer is driven with u[k-1], the control action
+    produced on the previous sample by Eq. (20). Passing u_max additionally
+    saturates the command and feeds the saturated value back, mirroring the
+    opt-in observer_uses_saturated_input parameter of controller.py; leave it
+    as None to reproduce the paper literally.
     """
 
     def __init__(self, kp: float, kd: float, omega_o: float, dt: float = Ts,
@@ -469,19 +474,19 @@ class NPSO_SSPD_Optimizer:
     # ── Main optimisation loop ────────────────────────────────────────────
     def optimize(self, w_mae=1.0, w_vol=1.0, w_acc=1.0, w_zc=1.0) -> Particle:
         """
-        w_mae, w_vol, w_acc, w_zc: fitness weights (Eq. 27), in that order:
+        w_mae, w_vol, w_acc, w_zc: fitness weights (Eq. 27), in that order.
+        The presets below are Table 3 of the paper:
 
-          Experiment 2 (MAE only):             1, 0,   0,   0
-          Experiment 3 (MAE + Volatility):     1, 1,   0,   0
-          Experiment 4 (MAE + Acceleration):   1, 0,   1,   0
-          Experiment 5 (MAE + Zero-Crossings): 1, 0,   0,   1
-          Experiment 6 (equal weights):        1, 1,   1,   1
-          Experiment 7 (reweighted):           1, 0.5, 0.5, 1
+          Experiment 2 (MAE only):                1, 0,   0,   0
+          Experiment 3 (MAE + Volatility):        1, 1,   0,   0
+          Experiment 4 (MAE + Zero-crossings):    1, 0,   0,   1
+          Experiment 5 (MAE + Acceleration):      1, 0,   1,   0
+          Experiment 6 (Combined, equal weights): 1, 1,   1,   1
+          Experiment 7 (Combined, reweighted):    1, 0.5, 0.5, 1
 
         NOTE: the previous version of this table listed w_mae = 0 for the
-        "MAE + X" rows, which contradicted their own labels, and its column
-        order did not match the argument order. Verify the values above
-        against the weights reported in the paper before re-running.
+        "MAE + X" rows, which contradicted both their own labels and Table 3,
+        and its column order did not match the argument order.
         """
         self.w_mae, self.w_vol, self.w_acc, self.w_zc = w_mae, w_vol, w_acc, w_zc
         self.report.weights = {
