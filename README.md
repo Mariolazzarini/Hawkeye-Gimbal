@@ -72,7 +72,7 @@ The system will publish gimbal velocity commands to /cam_vel and log data to /pi
 ### Running the NPSO Optimization
 The optimization script launches multiple controller instances with different parameters, collects performance data, and saves the best gains.
 ```bash
-python optimization/run_npsoSSPID.py
+python3 optimization/run_npsoSSPID.py
 ```
 Follow the on-screen menu to select the optimization mode (Fast, Normal, Extended, Exhaustive, or Custom). The results are saved as JSON in data/results/.
 
