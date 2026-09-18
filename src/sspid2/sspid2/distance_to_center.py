@@ -12,11 +12,14 @@ from ultralytics import YOLO
 from pathlib import Path
 import numpy as np
 from collections import deque
+from ament_index_python.packages import get_package_share_directory
+import os
 
 
 class YoloNode(Node):
     def __init__(self):
         super().__init__('yolov8_detector')
+        config_dir = os.path.join(get_package_share_directory('sspid2'), 'config')
 
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -44,8 +47,7 @@ class YoloNode(Node):
         self.bridge = CvBridge()
 
         # YOLO model
-        self.model = YOLO(str(Path(__file__).resolve().parent / "config" / "yolov8m.pt"))
-
+        self.model = YOLO(os.path.join(config_dir, "yolov8m.pt"))
         # ---- SPEED / RESOLUTION CONTROL ----
         self.TARGET_WIDTH = 640
         self.PROCESS_EVERY_N_FRAMES = 1
@@ -210,7 +212,7 @@ class YoloNode(Node):
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             frame_proc = self._resize_to_target_width(frame)
 
-            CUSTOM_TRACKER = str(Path(__file__).resolve().parent / "config" / "custom_tracker.yaml")
+            CUSTOM_TRACKER = os.path.join(config_dir, "custom_tracker.yaml")
             results = self.model.track(
                 frame_proc, persist=True, tracker=CUSTOM_TRACKER,
                 conf=0.35, imgsz=self.TARGET_WIDTH, classes=[0], verbose=False
