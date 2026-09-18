@@ -10,8 +10,14 @@ Usage:
   --sinusoidal / --step-response            # aliases for --scenario 1 / 2
 
 The /pid_log message must contain at least:
-  data[0] = pixel error x [px]
-  data[1] = pixel error y [px]
+  data[0] = pixel error x [px]   (e_x,t, Eq. 5)
+  data[1] = pixel error y [px]   (e_y,t, Eq. 5)
+
+Scenario 1 reproduces Eqs. (22)-(26) of the paper: MAE, volatility,
+acceleration-like second-order variation, zero-crossing count, and their
+normalized values. Scenario 2 reproduces the overshoot of Eqs. (39)-(40);
+ITAE and settling time are additional diagnostics that are NOT reported in the
+paper and are provided for convenience only.
 
 NOTE: /pid_log is published by controller.py only while a target is being
 tracked, so every metric below is scoped to tracking samples. Volatility and
@@ -183,24 +189,29 @@ def settling_time(radial, t, tolerance=SETTLING_TOLERANCE_PX, hold=SETTLING_HOLD
 
 
 def overshoot(error, t):
-    """Largest excursion past zero, normalised by the FIRST RECORDED sample.
+    """Overshoot of one image-plane error component, per Eq. (39) of the paper:
 
-    The evaluator has no synchronisation with the injection of the step, so
-    error[0] is whatever value was present when the first message arrived.
-    Start the evaluator before the step, or the percentage is normalised by an
+        O_i = max_t { max(0, -sgn(e_i0) * e_it) }
+
+    i.e. the maximum excursion beyond the image centre in the direction
+    opposite to the initial error. A component that never crosses the image
+    centre gets zero overshoot, and an exact zero-valued sample counts as a
+    crossing, both of which follow directly from the formula. The percentage is
+    100 * O_i / |e_i0| (Eq. 40).
+
+    NOTE: the evaluator has no synchronisation with the injection of the step,
+    so e_i0 is whatever value was present when the first message arrived. Start
+    the evaluator before the step, or the percentage is normalised by an
     arbitrary reference.
     """
+    error = np.asarray(error, dtype=float)
     if error.size < 2 or abs(error[0]) < 1e-12:
         return {"px": 0.0, "percent": 0.0, "peak_time_sec": float("nan")}
-    initial_sign = np.sign(error[0])
-    transitions = np.where(sign_no_zero(error)[:-1] != sign_no_zero(error)[1:])[0]
-    if transitions.size == 0:
+    excursion = np.maximum(0.0, -np.sign(error[0]) * error)
+    peak_index = int(np.argmax(excursion))
+    amplitude = float(excursion[peak_index])
+    if amplitude <= 0.0:
         return {"px": 0.0, "percent": 0.0, "peak_time_sec": float("nan")}
-    start = int(transitions[0] + 1)
-    opposite_side = -initial_sign * error[start:]
-    peak_local = int(np.argmax(opposite_side))
-    amplitude = max(0.0, float(opposite_side[peak_local]))
-    peak_index = start + peak_local
     return {
         "px": amplitude,
         "percent": 100.0 * amplitude / abs(float(error[0])),
