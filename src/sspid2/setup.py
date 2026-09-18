@@ -18,8 +18,8 @@ setup(
     zip_safe=True,
     maintainer='hawkeye',
     maintainer_email='workingelk@gmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Vision-based UAV gimbal tracking with SS-PD control and NPSO tuning.',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',
