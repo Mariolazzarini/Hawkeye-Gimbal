@@ -110,7 +110,6 @@ hawkeye-gimbal/
 │
 └── data/
     ├── raw/
-    ├── processed/
     └── results/
 ```
 
@@ -129,8 +128,7 @@ To evaluate tracking performance in real time (without interfering with the cont
 ```bash
 python3 tools/evaluator.py
 ```
-Raw and processed data are stored in data/raw/ and data/processed/.
-Optimization reports (JSON) are saved to data/results/. These include the best particle parameters and fitness components.
+Raw and processed data are stored in data/raw/. Graphic results are stored in data/restults/.
 If you use Git LFS, you can track large files (e.g., *.pt, *.bag). Otherwise, keep them out of the repository and document their download links.
 
 ## Citation
