@@ -57,7 +57,7 @@ source install/setup.bash
 Launch the perception and controller nodes:
 ```bash
 # Terminal 1: Perception node (YOLO + ByteTrack)
-ros2 run sspid2 distance_to_center
+ros2 run sspid2 distance_node
 
 # Terminal 2: Controller node (SS-PD)
 ros2 run sspid2 controller_node
