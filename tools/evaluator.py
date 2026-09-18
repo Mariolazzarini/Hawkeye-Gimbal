@@ -3,14 +3,21 @@
 Hawkeye Gimbal evaluator.
 
 Usage:
-  python3 hawkeye_evaluator.py                # all metrics
-  python3 hawkeye_evaluator.py --scenario:=1  # MAE, jerk, volatility, zero-crossings/sec
-  python3 hawkeye_evaluator.py --scenario:=2  # ITAE, settling time, overshoot
-  --experiment:=x  # Experiment ID
+  python3 tools/evaluator.py                # all metrics
+  python3 tools/evaluator.py --scenario:=1  # MAE, acceleration, volatility, zero-crossings
+  python3 tools/evaluator.py --scenario:=2  # ITAE, settling time, overshoot
+  --experiment:=x  # Experiment ID used in the output folder name
+  --sinusoidal / --step-response            # aliases for --scenario 1 / 2
 
 The /pid_log message must contain at least:
   data[0] = pixel error x [px]
   data[1] = pixel error y [px]
+
+NOTE: /pid_log is published by controller.py only while a target is being
+tracked, so every metric below is scoped to tracking samples. Volatility and
+acceleration are per-sample differences of a signal that is held between
+camera frames, so they also depend on the ratio between the control rate and
+the camera rate; report both rates alongside the numbers.
 """
 
 import argparse, json, sys
@@ -25,15 +32,31 @@ from rclpy.utilities import remove_ros_args
 from std_msgs.msg import Float64MultiArray
 
 DEFAULT_OUTPUT_ROOT = str(Path(__file__).resolve().parent.parent / "data" / "results")
+PID_LOG_TOPIC = "/pid_log"
 SINUSOIDAL_DURATION_SEC = 100.0
-STEP_RESPONSE_DURATION_SEC = 5.0 # Initial error = (200, 150) px
+STEP_RESPONSE_DURATION_SEC = 5.0  # Initial error = (200, 150) px
 SETTLING_TOLERANCE_PX = 5.0
 SETTLING_HOLD_SEC = 2.0
-PLOT_UPDATE_SEC = 0.001
+# Refreshing every 1 ms starved the executor and caused /pid_log messages to be
+# dropped, i.e. the evaluator perturbed the very measurement it was taking.
+PLOT_UPDATE_SEC = 0.05
+# Raw traces are decimated before being written to the JSON report; a 100 s run
+# at 1 kHz produced hundreds of MB of indented JSON otherwise.
+MAX_REPORT_POINTS = 5000
 
-SINUSOIDAL_METRICS = ["mae", "jerk", "volatility", "zero_crossings", "summary"]
+# ─── Normalization constants ────────────────────────────────────────────────
+# These MUST match C_MAE / C_VOL / C_ACC / C_ZC in optimization/npsoSSPID.py,
+# otherwise the "NPSO" columns reported here are not the quantities that were
+# actually optimised.
+C_MAE = 50.0   # px
+C_VOL = 5.0    # px
+C_ACC = 2.0    # px
+C_ZC = 1000.0  # crossings
+
+SINUSOIDAL_METRICS = ["mae", "acceleration", "volatility", "zero_crossings", "summary"]
 STEP_METRICS = ["itae", "settling_time", "overshoot"]
 ALL_METRICS = SINUSOIDAL_METRICS + STEP_METRICS
+
 
 def normalize_ros_style_cli(argv):
     """Allow ROS-like user syntax: --scenario:=1, --experiment:=1, --show:=false."""
@@ -45,6 +68,8 @@ def normalize_ros_style_cli(argv):
             fixed.append("--experiment=" + arg.split(":=", 1)[1])
         elif arg.startswith("--show:="):
             fixed.append("--show=" + arg.split(":=", 1)[1])
+        elif arg.startswith("--output-root:="):
+            fixed.append("--output-root=" + arg.split(":=", 1)[1])
         else:
             fixed.append(arg)
     return fixed
@@ -69,22 +94,54 @@ def str2bool(value):
 def parse_args():
     parser = argparse.ArgumentParser(description="Hawkeye metric evaluator")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--sinusoidal", action="store_true", help="Only measure MAE, jerk, volatility, and zero-crossings")
-    group.add_argument("--step-response", "--step_response", dest="step_response", action="store_true", help="Only measure ITAE, settling time, and overshoot")
+    group.add_argument("--sinusoidal", action="store_true",
+                       help="Alias for --scenario 1: MAE, acceleration, volatility, zero-crossings")
+    group.add_argument("--step-response", "--step_response", dest="step_response", action="store_true",
+                       help="Alias for --scenario 2: ITAE, settling time, overshoot")
     parser.add_argument("--duration", type=float, default=0.0, help="Override recording duration in seconds")
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT, help="Folder for summary files and plot PNGs")
-    parser.add_argument("--scenario", default="all", choices=["all", "1", "2"], help="Scenario ID: 1=sinusoidal, 2=step response, all=all metrics")
+    parser.add_argument("--scenario", default="all", choices=["all", "1", "2"],
+                        help="Scenario ID: 1=sinusoidal, 2=step response, all=all metrics")
     parser.add_argument("--experiment", default="1", help="Experiment ID used in the output folder name")
-    parser.add_argument("--show", type=str2bool, nargs="?", const=True, default=True, help="Show real-time plot windows: true or false. Default: true.")
+    parser.add_argument("--show", type=str2bool, nargs="?", const=True, default=True,
+                        help="Show real-time plot windows: true or false. Default: true.")
     cli_args = normalize_ros_style_cli(remove_ros_args(args=sys.argv)[1:])
-    return parser.parse_args(cli_args)
+    args = parser.parse_args(cli_args)
+
+    # FIX: --sinusoidal / --step-response used to be parsed and then ignored,
+    # because only --scenario was read downstream.
+    if args.sinusoidal:
+        args.scenario = "1"
+    elif args.step_response:
+        args.scenario = "2"
+    return args
+
+
+def sign_no_zero(x):
+    """Sign of x with exact zeros carried forward from the previous sample.
+
+    np.sign(0) == 0 would turn a single sample sitting exactly on the image
+    centre into two counted crossings.
+    """
+    s = np.sign(np.asarray(x, dtype=float))
+    if s.size == 0:
+        return s
+    zeros = s == 0
+    if not zeros.any():
+        return s
+    idx = np.where(~zeros, np.arange(s.size), 0)
+    np.maximum.accumulate(idx, out=idx)
+    s = s[idx]
+    s[s == 0] = 1.0  # leading zeros
+    return s
 
 
 def zero_crossings(signal):
     signal = np.asarray(signal, dtype=float)
     if signal.size < 2:
         return 0, np.zeros(0, dtype=int)
-    events = (np.sign(signal[:-1]) != np.sign(signal[1:])).astype(int)
+    s = sign_no_zero(signal)
+    events = (s[:-1] != s[1:]).astype(int)
     return int(np.sum(events)), events
 
 
@@ -98,23 +155,45 @@ def cumulative_trapezoid(y, x):
 
 
 def settling_time(radial, t, tolerance=SETTLING_TOLERANCE_PX, hold=SETTLING_HOLD_SEC):
+    """First instant after which the radial error stays inside `tolerance`.
+
+    Returns NaN when the signal never settles, or when the recording is too
+    short to confirm `hold` seconds inside the band. Note that with the default
+    constants (5 s of data, 2 s hold) no settling time beyond 3 s can be
+    observed: lengthen --duration if you expect slower responses.
+
+    Implemented in O(n): the previous version scanned every in-band index and
+    ran an np.all() window on each of them, which at 1 kHz made the live
+    metric update quadratic in the number of samples.
+    """
+    radial = np.asarray(radial, dtype=float)
+    t = np.asarray(t, dtype=float)
     if radial.size < 2:
         return float("nan")
-    inside = radial <= tolerance
-    for start in np.where(inside)[0]:
-        end = np.searchsorted(t, t[start] + hold, side="left")
-        if end >= t.size:
-            break
-        if np.all(inside[start:end + 1]):
-            return float(t[start])
-    return float("nan")
+    outside = np.where(radial > tolerance)[0]
+    if outside.size == 0:
+        start = 0
+    else:
+        start = int(outside[-1]) + 1
+        if start >= t.size:
+            return float("nan")
+    if (t[-1] - t[start]) < hold:
+        return float("nan")
+    return float(t[start])
 
 
 def overshoot(error, t):
+    """Largest excursion past zero, normalised by the FIRST RECORDED sample.
+
+    The evaluator has no synchronisation with the injection of the step, so
+    error[0] is whatever value was present when the first message arrived.
+    Start the evaluator before the step, or the percentage is normalised by an
+    arbitrary reference.
+    """
     if error.size < 2 or abs(error[0]) < 1e-12:
         return {"px": 0.0, "percent": 0.0, "peak_time_sec": float("nan")}
     initial_sign = np.sign(error[0])
-    transitions = np.where(np.sign(error[:-1]) != np.sign(error[1:]))[0]
+    transitions = np.where(sign_no_zero(error)[:-1] != sign_no_zero(error)[1:])[0]
     if transitions.size == 0:
         return {"px": 0.0, "percent": 0.0, "peak_time_sec": float("nan")}
     start = int(transitions[0] + 1)
@@ -137,7 +216,8 @@ class HawkeyeEvaluator(Node):
         self.scenario = args.scenario
         self.metrics_to_use = self.choose_metrics(self.scenario)
         self.duration_sec = self.choose_duration(args.duration, self.scenario)
-        self.output_dir = Path(DEFAULT_OUTPUT_ROOT).expanduser() / f"Exp_{args.experiment}_scenario_{self.scenario}"
+        # FIX: --output-root was declared but ignored.
+        self.output_dir = Path(args.output_root).expanduser() / f"Exp_{args.experiment}_scenario_{self.scenario}"
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.t0 = None
@@ -145,12 +225,13 @@ class HawkeyeEvaluator(Node):
         self.finished = False
         self.figures = {}
 
-        self.create_subscription(Float64MultiArray, "/pid_log", self.callback, 1000)
+        self.create_subscription(Float64MultiArray, PID_LOG_TOPIC, self.callback, 1000)
         self.create_timer(PLOT_UPDATE_SEC, self.update)
         self.setup_plots()
         self.get_logger().info(
             f"Started Hawkeye evaluator | metrics={self.metrics_to_use} | "
-            f"duration={self.duration_sec:.1f}s | topic={"/pid_log"} | output={self.output_dir}"
+            f"duration={self.duration_sec:.1f}s | topic={PID_LOG_TOPIC} | "
+            f"output={self.output_dir}"
         )
 
     @staticmethod
@@ -162,7 +243,7 @@ class HawkeyeEvaluator(Node):
         return ALL_METRICS
 
     @staticmethod
-    def choose_duration(duration, scenario): 
+    def choose_duration(duration, scenario):
         if duration != 0.0:
             return float(duration)
         return STEP_RESPONSE_DURATION_SEC if scenario == "2" else SINUSOIDAL_DURATION_SEC
@@ -188,25 +269,32 @@ class HawkeyeEvaluator(Node):
     def compute_metrics(self):
         t, ex, ey, radial = self.arrays()
         diff = np.diff(radial)
-        jerk_samples = np.abs(np.diff(diff))
+        accel_samples = np.abs(np.diff(diff))
         zc_x, zc_x_events = zero_crossings(ex)
         zc_y, zc_y_events = zero_crossings(ey)
         ox = overshoot(ex, t)
         oy = overshoot(ey, t)
 
+        # FIX: mae_px used to be multiplied by an undocumented 0.75 factor,
+        # which made the reported MAE 25 % lower than the measured mean radial
+        # error and inconsistent with the fitness used by the optimiser.
+        mae = float(np.mean(radial)) if radial.size else float("nan")
+        vol = float(np.std(diff)) if diff.size else float("nan")
+        acc = float(np.mean(accel_samples)) if accel_samples.size else float("nan")
+
         m = {
             "samples": int(t.size),
             "duration_sec": float(t[-1] - t[0]) if t.size > 1 else 0.0,
-            "mae_px": float(np.mean(radial))*0.75 if radial.size else float("nan"),
-            "mae_npso": min(1.0, float(np.mean(radial))*0.75 / 50.0) if radial.size else float("nan"),
-            "volatility_std_delta_px_per_sample": float(np.std(diff)) if diff.size else float("nan"),
-            "volatility_npso": min(1.0, float(np.std(diff)) / 20.0) if diff.size else float("nan"),
-            "jerk_mean_abs_second_difference_px_per_sample2": float(np.mean(jerk_samples)) if jerk_samples.size else float("nan"),
-            "jerk_npso": min(1.0, float(np.mean(jerk_samples)) / 5.0) if jerk_samples.size else float("nan"),
+            "mae_px": mae,
+            "mae_npso": min(1.0, mae / C_MAE) if np.isfinite(mae) else float("nan"),
+            "volatility_std_delta_px_per_sample": vol,
+            "volatility_npso": min(1.0, vol / C_VOL) if np.isfinite(vol) else float("nan"),
+            "acceleration_mean_abs_second_difference_px_per_sample2": acc,
+            "acceleration_npso": min(1.0, acc / C_ACC) if np.isfinite(acc) else float("nan"),
             "zero_crossings_x": zc_x,
             "zero_crossings_y": zc_y,
             "zero_crossings_total": zc_x + zc_y,
-            "zero_crossings_npso": min(1.0, float(zc_x + zc_y) / (SINUSOIDAL_DURATION_SEC*2)),
+            "zero_crossings_npso": min(1.0, float(zc_x + zc_y) / C_ZC),
             "itae_radial_px_s2": float(TRAPZ(t * radial, t)) if t.size > 1 else float("nan"),
             "settling_time_sec": settling_time(radial, t),
             "settling_tolerance_px": SETTLING_TOLERANCE_PX,
@@ -226,7 +314,7 @@ class HawkeyeEvaluator(Node):
         always = key in {"samples", "duration_sec"}
         sinusoidal = (
             key.startswith("mae") or key.startswith("volatility") or
-            key.startswith("jerk") or key.startswith("zero_crossings")
+            key.startswith("acceleration") or key.startswith("zero_crossings")
         )
         step = key.startswith("itae") or key.startswith("settling") or key.startswith("overshoot")
         return always or (sinusoidal and any(x in self.metrics_to_use for x in SINUSOIDAL_METRICS)) or (step and any(x in self.metrics_to_use for x in STEP_METRICS))
@@ -252,55 +340,54 @@ class HawkeyeEvaluator(Node):
         ax.clear()
         ax.grid(True)
 
+        nan = float("nan")
         if name == "mae":
             ax.plot(t, radial, label="Radial error")
-            ax.axhline(metrics.get("mae_px", float("nan")), linestyle="--", linewidth=1, label="MAE")
-            ax.set_title(f"MAE = {metrics.get("mae_px", float("nan")):.4f} px | NPSO = {metrics.get("mae_npso", float("nan")):.4f}")            
+            ax.axhline(metrics.get("mae_px", nan), linestyle="--", linewidth=1, label="MAE")
+            ax.set_title(f"MAE = {metrics.get('mae_px', nan):.4f} px | NPSO = {metrics.get('mae_npso', nan):.4f}")
             ax.set_ylabel("Radial error [px]")
             ax.legend()
         elif name == "volatility":
             ax.plot(t[1:], np.diff(radial))
             ax.axhline(0.0, linewidth=1)
-            ax.set_title(f"Volatility = {metrics.get('volatility_std_delta_px_per_sample', float('nan')):.4f} px/sample | NPSO = {metrics.get('volatility_npso', float('nan')):.4f}")
-            ax.set_ylabel("Δ radial error [px/sample]")
-        elif name == "jerk":
+            ax.set_title(f"Volatility = {metrics.get('volatility_std_delta_px_per_sample', nan):.4f} px/sample | NPSO = {metrics.get('volatility_npso', nan):.4f}")
+            ax.set_ylabel("Delta radial error [px/sample]")
+        elif name == "acceleration":
             diff = np.diff(radial)
             ax.plot(t[2:], np.abs(np.diff(diff)))
-            ax.set_title(f"Jerk = {metrics.get('jerk_mean_abs_second_difference_px_per_sample2', float('nan')):.4f} px/sample² | NPSO = {metrics.get('jerk_npso', float('nan')):.4f}")
-            ax.set_ylabel("|Δ² radial error| [px/sample²]")
+            key = "acceleration_mean_abs_second_difference_px_per_sample2"
+            ax.set_title(f"Acceleration = {metrics.get(key, nan):.4f} px/sample^2 | NPSO = {metrics.get('acceleration_npso', nan):.4f}")
+            ax.set_ylabel("|Delta^2 radial error| [px/sample^2]")
         elif name == "zero_crossings":
             _, zcx = zero_crossings(ex)
             _, zcy = zero_crossings(ey)
             total = np.cumsum(zcx) + np.cumsum(zcy)
             ax.step(t[1:], total, where="post")
-            ax.set_title(f"Zero-crossings = {metrics.get('zero_crossings_total', 0)} | NPSO = {metrics.get('zero_crossings_npso', float('nan')):.4f}")
+            ax.set_title(f"Zero-crossings = {metrics.get('zero_crossings_total', 0)} | NPSO = {metrics.get('zero_crossings_npso', nan):.4f}")
             ax.set_ylabel("Cumulative count")
         elif name == "summary":
-            labels = ["MAE", "Volatility", "Jerk", "Zero-crossings"]
+            labels = ["MAE", "Volatility", "Acceleration", "Zero-crossings"]
             values = [
-                metrics.get("mae_npso", float("nan")),
-                metrics.get("volatility_npso", float("nan")),
-                metrics.get("jerk_npso", float("nan")),
-                metrics.get("zero_crossings_npso", float("nan")),
+                metrics.get("mae_npso", nan),
+                metrics.get("volatility_npso", nan),
+                metrics.get("acceleration_npso", nan),
+                metrics.get("zero_crossings_npso", nan),
             ]
             bars = ax.bar(labels, values)
             ax.set_ylim(0.0, 1.1)
             ax.set_ylabel("Normalized NPSO value")
-            ax.set_title(
-                f"Scenario 1 normalized NPSO metrics | "
-                f"Experiment {self.experiment}"
-            )
+            ax.set_title(f"Scenario 1 normalized NPSO metrics | Experiment {self.experiment}")
             for bar, value in zip(bars, values):
                 if np.isfinite(value):
                     ax.text(bar.get_x() + bar.get_width() / 2.0, min(value + 0.03, 1.05), f"{value:.3f}", ha="center", va="bottom", fontsize=9)
         elif name == "itae":
             ax.plot(t, cumulative_trapezoid(t * radial, t))
-            ax.set_title(f"ITAE = {metrics.get('itae_radial_px_s2', float('nan')):.4f} px·s²")
-            ax.set_ylabel("Cumulative ITAE [px·s²]")
+            ax.set_title(f"ITAE = {metrics.get('itae_radial_px_s2', nan):.4f} px*s^2")
+            ax.set_ylabel("Cumulative ITAE [px*s^2]")
         elif name == "settling_time":
             ax.plot(t, radial)
             ax.axhline(SETTLING_TOLERANCE_PX, linestyle="--", linewidth=1)
-            st = metrics.get("settling_time_sec", float("nan"))
+            st = metrics.get("settling_time_sec", nan)
             if np.isfinite(st):
                 ax.axvline(st, linestyle="--", linewidth=1)
             ax.set_title(f"Settling time = {st:.4f}s" if np.isfinite(st) else "Settling time = not settled")
@@ -310,7 +397,7 @@ class HawkeyeEvaluator(Node):
             ax.plot(t, ey, label="error y")
             ax.axhline(0.0, linestyle="--", linewidth=1)
             ax.legend()
-            ax.set_title(f"Overshoot max = {metrics.get('overshoot_max_px', float('nan')):.4f} px | {metrics.get('overshoot_max_percent', float('nan')):.2f}%")
+            ax.set_title(f"Overshoot max = {metrics.get('overshoot_max_px', nan):.4f} px | {metrics.get('overshoot_max_percent', nan):.2f}%")
             ax.set_ylabel("Signed error [px]")
 
         ax.set_xlabel("Time [s]")
@@ -322,31 +409,39 @@ class HawkeyeEvaluator(Node):
         t, ex, ey, radial = self.arrays()
         if t.size < 2:
             return
-        metrics = self.compute_metrics()
         if self.args.show:
+            metrics = self.compute_metrics()
             for name in self.metrics_to_use:
                 self.update_plot(name, t, ex, ey, radial, metrics)
             plt.pause(0.001)
         if t[-1] >= self.duration_sec:
+            # Do NOT call rclpy.shutdown() from inside a callback: main()
+            # watches self.finished and tears the context down cleanly.
             self.finalize()
-            rclpy.shutdown()
 
     @staticmethod
     def to_list(array):
         return np.asarray(array, dtype=float).tolist()
 
+    @staticmethod
+    def _step(size):
+        return max(1, int(np.ceil(size / MAX_REPORT_POINTS)))
+
     def save_plot_report(self, metrics):
         """
         Save one compact JSON report with only the data needed
-        to reproduce the generated plots directly.
+        to reproduce the generated plots directly. Traces are decimated to at
+        most MAX_REPORT_POINTS samples.
         """
         t, ex, ey, radial = self.arrays()
+        k = self._step(t.size)
 
         report = {
             "experiment": self.experiment,
             "scenario": self.scenario,
             "duration_sec": metrics.get("duration_sec"),
             "samples": metrics.get("samples"),
+            "decimation_step": k,
             "plots": {}
         }
 
@@ -357,8 +452,8 @@ class HawkeyeEvaluator(Node):
             report["plots"]["mae"] = {
                 "x_label": "Time [s]",
                 "y_label": "Radial error [px]",
-                "x": self.to_list(t),
-                "y": self.to_list(radial),
+                "x": self.to_list(t[::k]),
+                "y": self.to_list(radial[::k]),
                 "mae_line_px": metrics.get("mae_px"),
                 "final_value_px": metrics.get("mae_px"),
                 "npso_value": metrics.get("mae_npso"),
@@ -370,23 +465,24 @@ class HawkeyeEvaluator(Node):
             report["plots"]["volatility"] = {
                 "x_label": "Time [s]",
                 "y_label": "Delta radial error [px/sample]",
-                "x": self.to_list(t[1:]),
-                "y": self.to_list(delta_radial),
+                "x": self.to_list(t[1:][::k]),
+                "y": self.to_list(delta_radial[::k]),
                 "final_value_px_per_sample": metrics.get("volatility_std_delta_px_per_sample"),
                 "npso_value": metrics.get("volatility_npso"),
             }
 
-        if "jerk" in self.metrics_to_use:
+        if "acceleration" in self.metrics_to_use:
             delta_radial = np.diff(radial)
-            jerk_values = np.abs(np.diff(delta_radial))
+            accel_values = np.abs(np.diff(delta_radial))
 
-            report["plots"]["jerk"] = {
+            report["plots"]["acceleration"] = {
                 "x_label": "Time [s]",
-                "y_label": "Absolute second difference [px/sample²]",
-                "x": self.to_list(t[2:]),
-                "y": self.to_list(jerk_values),
-                "final_value_px_per_sample2": metrics.get("jerk_mean_abs_second_difference_px_per_sample2"),
-                "npso_value": metrics.get("jerk_npso"),
+                "y_label": "Absolute second difference [px/sample^2]",
+                "x": self.to_list(t[2:][::k]),
+                "y": self.to_list(accel_values[::k]),
+                "final_value_px_per_sample2": metrics.get(
+                    "acceleration_mean_abs_second_difference_px_per_sample2"),
+                "npso_value": metrics.get("acceleration_npso"),
             }
 
         if "zero_crossings" in self.metrics_to_use:
@@ -397,8 +493,8 @@ class HawkeyeEvaluator(Node):
             report["plots"]["zero_crossings"] = {
                 "x_label": "Time [s]",
                 "y_label": "Cumulative count",
-                "x": self.to_list(t[1:]),
-                "y": self.to_list(cumulative_zc),
+                "x": self.to_list(t[1:][::k]),
+                "y": self.to_list(cumulative_zc[::k]),
                 "zero_crossings_x": metrics.get("zero_crossings_x"),
                 "zero_crossings_y": metrics.get("zero_crossings_y"),
                 "zero_crossings_total": metrics.get("zero_crossings_total"),
@@ -409,18 +505,19 @@ class HawkeyeEvaluator(Node):
             report["plots"]["summary"] = {
                 "x_label": "Metric",
                 "y_label": "Normalized NPSO value",
-                "labels": ["MAE", "Volatility", "Jerk", "Zero-crossings"],
+                "labels": ["MAE", "Volatility", "Acceleration", "Zero-crossings"],
                 "values": [
                     metrics.get("mae_npso"),
                     metrics.get("volatility_npso"),
-                    metrics.get("jerk_npso"),
+                    metrics.get("acceleration_npso"),
                     metrics.get("zero_crossings_npso"),
                 ],
+                # These now match optimization/npsoSSPID.py exactly.
                 "normalizers": {
-                    "mae": 50.0,
-                    "volatility": 20.0,
-                    "jerk": 5.0,
-                    "zero_crossings": 100.0,
+                    "mae": C_MAE,
+                    "volatility": C_VOL,
+                    "acceleration": C_ACC,
+                    "zero_crossings": C_ZC,
                 },
             }
 
@@ -432,9 +529,9 @@ class HawkeyeEvaluator(Node):
 
             report["plots"]["itae"] = {
                 "x_label": "Time [s]",
-                "y_label": "Cumulative ITAE [px·s²]",
-                "x": self.to_list(t),
-                "y": self.to_list(cumulative_itae),
+                "y_label": "Cumulative ITAE [px*s^2]",
+                "x": self.to_list(t[::k]),
+                "y": self.to_list(cumulative_itae[::k]),
                 "final_value_px_s2": metrics.get("itae_radial_px_s2"),
             }
 
@@ -442,8 +539,8 @@ class HawkeyeEvaluator(Node):
             report["plots"]["settling_time"] = {
                 "x_label": "Time [s]",
                 "y_label": "Radial error [px]",
-                "x": self.to_list(t),
-                "y": self.to_list(radial),
+                "x": self.to_list(t[::k]),
+                "y": self.to_list(radial[::k]),
                 "settling_time_sec": metrics.get("settling_time_sec"),
                 "settling_tolerance_px": SETTLING_TOLERANCE_PX,
                 "settling_hold_sec": SETTLING_HOLD_SEC,
@@ -453,9 +550,9 @@ class HawkeyeEvaluator(Node):
             report["plots"]["overshoot"] = {
                 "x_label": "Time [s]",
                 "y_label": "Signed error [px]",
-                "x": self.to_list(t),
-                "error_x_px": self.to_list(ex),
-                "error_y_px": self.to_list(ey),
+                "x": self.to_list(t[::k]),
+                "error_x_px": self.to_list(ex[::k]),
+                "error_y_px": self.to_list(ey[::k]),
                 "overshoot_x_px": metrics.get("overshoot_x_px"),
                 "overshoot_y_px": metrics.get("overshoot_y_px"),
                 "overshoot_max_px": metrics.get("overshoot_max_px"),
@@ -470,13 +567,18 @@ class HawkeyeEvaluator(Node):
             return
 
         self.finished = True
+        t, ex, ey, radial = self.arrays()
+        if t.size < 2:
+            self.get_logger().warn(
+                f"Not enough samples on {PID_LOG_TOPIC} to compute any metric. "
+                f"Remember that it is only published while a target is tracked."
+            )
+            return
+
         metrics = self.compute_metrics()
 
-        t, ex, ey, radial = self.arrays()
-
-        if t.size >= 2:
-            for name in self.metrics_to_use:
-                self.update_plot(name, t, ex, ey, radial, metrics)
+        for name in self.metrics_to_use:
+            self.update_plot(name, t, ex, ey, radial, metrics)
 
         self.save_plot_report(metrics)
 
@@ -492,7 +594,8 @@ def main():
     rclpy.init(args=sys.argv)
     node = HawkeyeEvaluator(args)
     try:
-        rclpy.spin(node)
+        while rclpy.ok() and not node.finished:
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         node.finalize()
     finally:
