@@ -45,11 +45,16 @@ pip install -r requirements.txt
 Download YOLOv8 weights and place `yolov8m.pt` inside
 `src/sspid2/sspid2/config/`. The node loads it automatically
 from that path. You can download the weights from Ultralytics.
-
 Build the ROS 2 package:
 ```bash
 colcon build --packages-select sspid2
 source install/setup.bash
+```
+After building, copy the YOLO weights into the installed package directory
+so that `ros2 run` can find them. Adjust the Python version if needed:
+```bash
+cp src/sspid2/sspid2/config/yolov8m.pt \
+   install/sspid2/lib/python3.12/site-packages/sspid2/config/
 ```
 
 ## Usage
