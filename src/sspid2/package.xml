@@ -2,10 +2,14 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>sspid2</name>
-  <version>0.0.0</version>
+  <version>1.0.0</version>
   <description>Vision-based UAV gimbal tracking with State-Space PD control and multi-objective NPSO tuning.</description>
   <maintainer email="mario.lazzarinisola@study.thws.de">Mario Lazzarini Sola</maintainer>
   <license>MIT</license>
+
+  <author email="msuega.iorpenda@thws.de">M.J. Iorpenda</author>
+  <author email="mario.lazzarinisola@study.thws.de">Mario Lazzarini Sola</author>
+  <author email="volker.willert@thws.de">Volker Willert</author>
 
   <!-- Core ROS 2 dependencies -->
   <depend>rclpy</depend>
@@ -18,6 +22,8 @@
   <depend>python3-numpy</depend>
   <depend>python3-opencv</depend>
   <depend>ament_index_python</depend>
+
+  <!-- ultralytics is not available as a ROS package; see requirements.txt -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
