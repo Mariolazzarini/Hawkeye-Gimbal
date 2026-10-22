@@ -275,8 +275,6 @@ class NPSO_SSPD_Optimizer:
       evaluations reported in the paper, with N_IT = 11 inside the schedule
       rho_k = k / N_IT (Eq. 31).
     - eta = [Kp, Kd, omega_o]^T (Eq. 11); search space Omega (Eq. 32).
-    - Position update uses the global best (Eq. 30), not the particle's
-      own previous position.
     """
 
     def __init__(self, num_particles: int = 20, num_iterations: int = 10):
@@ -437,7 +435,7 @@ class NPSO_SSPD_Optimizer:
         r2 = [random.random(), random.random(), random.random()]
 
         def _vel(v, p_best, x, g_best, r1_i, r2_i):
-            # Eq. (29): elementwise, using the particle's OWN position x
+            # Eq. (29): elementwise, using the particle's own position x
             return w * v + c1 * r1_i * (p_best - x) + c2 * r2_i * (g_best - x)
 
         def _clamp(x, lo, hi):
@@ -454,9 +452,9 @@ class NPSO_SSPD_Optimizer:
         particle.v_kp, particle.v_kd, particle.v_omega_o = v_kp, v_kd, v_omega_o
 
         # Position update (Eq. 30): eta^(k+1) = Proj_Omega(g^(k) + v^(k+1))
-        particle.kp = _clamp(gb.kp + v_kp, *self.kp_range)
-        particle.kd = _clamp(gb.kd + v_kd, *self.kd_range)
-        particle.omega_o = _clamp(gb.omega_o + v_omega_o, *self.omega_range)
+        particle.kp = _clamp(particle.kp + v_kp, *self.kp_range)
+        particle.kd = _clamp(particle.kd + v_kd, *self.kd_range)
+        particle.omega_o = _clamp(particle.omega_o + v_omega_o, *self.omega_range)
 
     def _set_personal_best(self, particle: Particle):
         particle.b_kp = particle.kp
