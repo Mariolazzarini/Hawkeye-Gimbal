@@ -51,6 +51,14 @@ C_VOL = 5.0    # px
 C_ACC = 2.0    # px
 C_ZC = 1000.0  # crossings
 
+# ─── Reproducibility & scenario metadata (Reviewers 1.4, 1.5, 2.1) ─────────
+# DEFAULT_SEED = None -> runs are NOT reproducible (current behavior).
+# DEFAULT_SEED = 42   -> initial swarm and per-step r1/r2 are reproducible.
+# EVAL_SCENARIO is recorded in the JSON report so that in-sample vs
+# out-of-sample fitness evaluation can be distinguished (Reviewer 1.5).
+DEFAULT_SEED: Optional[int] = None
+EVAL_SCENARIO: str = "scenario_1_in_sample"
+
 # ─── PSO coefficient schedule (Eq. 31) ─────────────────────────────────────
 def _pso_coefficients(k: int, n_it: int):
     """w_k, c1_k, c2_k as functions of the normalized iteration index
@@ -191,9 +199,11 @@ class DataCollectorNode(Node):
 
 # ─── Report ─────────────────────────────────────────────────────────────────
 class OptimizationReport:
-    def __init__(self, num_particles, num_iterations):
+    def __init__(self, num_particles, num_iterations, seed=None, scenario=None):
         self.num_particles = num_particles
         self.num_iterations = num_iterations
+        self.seed = seed
+        self.scenario = scenario
         self.start_time = datetime.now()
         self.weights = None
         self.interrupted = False
@@ -243,6 +253,8 @@ class OptimizationReport:
                 'total_evaluations': len(self.all_particles),
                 'interrupted': self.interrupted,
                 'weights': self.weights,
+                'seed': self.seed,
+                'scenario': self.scenario,
                 'eval_duration_sec': EVAL_DURATION_S,
                 'sampling_period_sec': Ts,
                 'search_space': {
@@ -275,9 +287,13 @@ class NPSO_SSPD_Optimizer:
       evaluations reported in the paper, with N_IT = 11 inside the schedule
       rho_k = k / N_IT (Eq. 31).
     - eta = [Kp, Kd, omega_o]^T (Eq. 11); search space Omega (Eq. 32).
+    - `seed` and `scenario` are optional; passing a seed makes the initial
+      swarm and the per-step perturbations reproducible and is recorded in
+      the JSON report (Reviewers 1.4, 1.5, 2.1).
     """
 
-    def __init__(self, num_particles: int = 20, num_iterations: int = 10):
+    def __init__(self, num_particles: int = 20, num_iterations: int = 10,
+                 seed: Optional[int] = None, scenario: Optional[str] = None):
         if num_particles < 1 or num_iterations < 1:
             raise ValueError('num_particles and num_iterations must be >= 1')
 
@@ -289,13 +305,28 @@ class NPSO_SSPD_Optimizer:
         self.kd_range = KD_RANGE
         self.omega_range = OMEGA_RANGE
 
+        # Reproducibility: seed both RNGs used below. When unset, fall back
+        # to DEFAULT_SEED (kept for backward compatibility with prior runs).
+        self.seed = seed if seed is not None else DEFAULT_SEED
+        if self.seed is not None:
+            random.seed(self.seed)
+            np.random.seed(self.seed)
+        else:
+            print("WARNING: no seed set (DEFAULT_SEED=None). Runs will not be "
+                  "reproducible. Pass seed=<int> to reproduce the report.")
+
+        self.scenario = scenario if scenario is not None else EVAL_SCENARIO
+
         # Default weights (Eq. 27); overwritten by optimize().
         self.w_mae, self.w_vol, self.w_acc, self.w_zc = 1.0, 1.0, 1.0, 1.0
 
         self.best_global_particle: Optional[Particle] = None
         self.best_global_fitness = float('inf')
 
-        self.report = OptimizationReport(self.NUM_PARTICLES, self.N_IT)
+        self.report = OptimizationReport(
+            self.NUM_PARTICLES, self.N_IT,
+            seed=self.seed, scenario=self.scenario
+        )
 
         rclpy.init()
         self.collector_node = DataCollectorNode()
@@ -499,6 +530,7 @@ class NPSO_SSPD_Optimizer:
         print(f"Particles: {self.NUM_PARTICLES}, Total rounds: {self.N_IT} "
               f"(1 initial + {self.NUM_UPDATE_ROUNDS} updates)")
         print(f"Weights: wMAE={w_mae}, wVol={w_vol}, wAcc={w_acc}, wZC={w_zc}")
+        print(f"Seed: {self.seed}, Scenario: {self.scenario}")
         print(f"{'=' * 50}")
 
         w = c1 = c2 = 0.0
