@@ -513,9 +513,6 @@ class NPSO_SSPD_Optimizer:
           Experiment 6 (Combined, equal weights): 1, 1,   1,   1
           Experiment 7 (Combined, reweighted):    1, 0.5, 0.5, 1
 
-        NOTE: the previous version of this table listed w_mae = 0 for the
-        "MAE + X" rows, which contradicted both their own labels and Table 3,
-        and its column order did not match the argument order.
         """
         self.w_mae, self.w_vol, self.w_acc, self.w_zc = w_mae, w_vol, w_acc, w_zc
         self.report.weights = {
