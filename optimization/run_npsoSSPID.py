@@ -12,7 +12,7 @@ def save_report(optimizer, interrupted=False):
     report_dict = optimizer.report.to_dict()
     timestamp   = datetime.now().strftime("%H:%M_%d.%m")
     report_dir = "/home/hawkeye/ros_hawkeye/robotics_project/ws_new2/extra/npso_sspid2"
-    os.makedirs(report_dir, exist_ok=True) # Crear el directorio si no existe
+    os.makedirs(report_dir, exist_ok=True) # Create directory if it does not exist
     filename    = os.path.join(report_dir, f"opt_{timestamp}.json")
 
     with open(filename, 'w') as f:
