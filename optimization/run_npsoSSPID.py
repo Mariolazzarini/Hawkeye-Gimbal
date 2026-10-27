@@ -65,13 +65,12 @@ def main():
         num_iterations = 20
     else:
         try:
-            num_particles  = int(input("Number of particles: ") or "50")
-            num_iterations = int(input("Number of iterations: ") or "20")
+            num_particles  = int(input("Number of particles: ") or "20")
+            num_iterations = int(input("Number of iterations: ") or "10")
         except:
             num_particles  = 20
-            num_iterations = 50
+            num_iterations = 10
 
-    # Reproducibility (Reviewers 1.4, 2.1): prompt for a seed.
     # Empty -> fall back to npsoSSPID.DEFAULT_SEED (unseeded if that is None).
     try:
         seed_str = input("\nRandom seed (int, empty = default): ").strip()
@@ -104,33 +103,26 @@ def main():
 
     try:
         best = optimizer.optimize()
+        interrupted = optimizer.report.interrupted
 
         print_summary(optimizer)
-        save_report(optimizer, interrupted=False)
+        save_report(optimizer, interrupted=interrupted)
 
         print("\n" + "="*50)
-        print("🎉 OPTIMISATION COMPLETED!")
+        if interrupted:
+            print("⚠️  OPTIMISATION INTERRUPTED BY USER")
+        else:
+            print("🎉 OPTIMISATION COMPLETED!")
         print("="*50)
-        print(f"\n🏆 BEST RESULT: {best.fitness:.5f} fitness")
-        print(f"  kp      = {best.kp:.6f}")
-        print(f"  kd      = {best.kd:.6f}")
-        print(f"  omega_o = {best.omega_o:.4f}")
 
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Optimisation interrupted by user!")
-
-        print_summary(optimizer)
-        save_report(optimizer, interrupted=True)
-
-        best = optimizer.best_global_particle
         if best is not None:
-            print("\n📊 Best parameters found so far:")
-            print(f"  Combined Fitness: {best.fitness:.5f}")
-            print(f"\nBEST PARAMETERS:")
+            label = "Best parameters found so far" if interrupted else "BEST RESULT"
+            print(f"\n🏆 {label}: {best.fitness:.5f} fitness")
             print(f"  kp      = {best.kp:.6f}")
             print(f"  kd      = {best.kd:.6f}")
             print(f"  omega_o = {best.omega_o:.4f}")
-
+        else:
+            print("\nNo evaluation was completed, so there is no result to report.")
 
     except Exception as e:
         print(f"\n❌ Error during optimisation: {e}")
