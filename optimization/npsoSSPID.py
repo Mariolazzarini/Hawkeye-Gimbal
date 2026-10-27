@@ -457,22 +457,36 @@ class NPSO_SSPD_Optimizer:
         return np.array([])
 
     # ── NPSO update (Eqs. 29-31) ────────────────────────────────────────────
-    def _update_particle(self, particle: Particle, w: float, c1: float, c2: float):
-        gb = self.best_global_particle
+    def _update_particle(self, particle: Particle, w: float, c1: float, c2: float,
+                         gb: Optional[Particle]):
+        # gb is the global best of the PREVIOUS round, captured once at the
+        # start of the round so that all particles share the same g.
         if gb is None:
             # No successful evaluation yet: keep the particle where it is.
             return
+
+        # NPSO iterative subset initialization:
+        # (1) the last global best initializes the particle position
+        particle.kp = gb.kp
+        particle.kd = gb.kd
+        particle.omega_o = gb.omega_o
+        # (2) random particle velocity within the velocity limits
+        particle.v_kp = random.uniform(V_MIN[0], V_MAX[0])
+        particle.v_kd = random.uniform(V_MIN[1], V_MAX[1])
+        particle.v_omega_o = random.uniform(V_MIN[2], V_MAX[2])
+
         r1 = [random.random(), random.random(), random.random()]
         r2 = [random.random(), random.random(), random.random()]
 
         def _vel(v, p_best, x, g_best, r1_i, r2_i):
-            # Eq. (29): elementwise, using the particle's own position x
+            # Eq. (29): elementwise, x is the particle's current position
+            # (= g after the initialization above)
             return w * v + c1 * r1_i * (p_best - x) + c2 * r2_i * (g_best - x)
 
         def _clamp(x, lo, hi):
             return max(lo, min(hi, x))
 
-        # Velocity update (uses own current position for both pulls)
+        # Velocity update
         v_kp = _clamp(_vel(particle.v_kp, particle.b_kp, particle.kp, gb.kp, r1[0], r2[0]),
                        V_MIN[0], V_MAX[0])
         v_kd = _clamp(_vel(particle.v_kd, particle.b_kd, particle.kd, gb.kd, r1[1], r2[1]),
@@ -483,9 +497,9 @@ class NPSO_SSPD_Optimizer:
         particle.v_kp, particle.v_kd, particle.v_omega_o = v_kp, v_kd, v_omega_o
 
         # Position update (Eq. 30): eta^(k+1) = Proj_Omega(g^(k) + v^(k+1))
-        particle.kp = _clamp(particle.kp + v_kp, *self.kp_range)
-        particle.kd = _clamp(particle.kd + v_kd, *self.kd_range)
-        particle.omega_o = _clamp(particle.omega_o + v_omega_o, *self.omega_range)
+        particle.kp = _clamp(gb.kp + v_kp, *self.kp_range)
+        particle.kd = _clamp(gb.kd + v_kd, *self.kd_range)
+        particle.omega_o = _clamp(gb.omega_o + v_omega_o, *self.omega_range)
 
     def _set_personal_best(self, particle: Particle):
         particle.b_kp = particle.kp
@@ -531,6 +545,7 @@ class NPSO_SSPD_Optimizer:
         print(f"{'=' * 50}")
 
         w = c1 = c2 = 0.0
+        round_gbest = None
         try:
             for round_idx in range(self.N_IT):  # 0 .. N_IT-1
                 if round_idx == 0:
@@ -541,13 +556,17 @@ class NPSO_SSPD_Optimizer:
                     w, c1, c2 = _pso_coefficients(round_idx - 1, self.N_IT)
                     print(f"\n{'#' * 50}\n   ROUND {round_idx}/{self.N_IT - 1}\n{'#' * 50}")
                     print(f"  PSO params: w={w:.3f}, c1={c1:.3f}, c2={c2:.3f}")
+                    # Global best of the previous round, shared by all particles
+                    # of this round (best_global_particle is reassigned, never
+                    # mutated, so this reference is a stable snapshot).
+                    round_gbest = self.best_global_particle
 
                 for i, particle in enumerate(particles):
                     particle.iteration = round_idx
                     particle.particle_id = i + 1
 
                     if round_idx > 0:
-                        self._update_particle(particle, w, c1, c2)
+                        self._update_particle(particle, w, c1, c2, round_gbest)
 
                     data = self._collect_real_data(particle, i + 1, self.NUM_PARTICLES, round_idx)
                     particle.fitness = self._fitness(data, particle)
