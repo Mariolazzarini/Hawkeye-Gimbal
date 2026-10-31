@@ -1,7 +1,7 @@
-########################################################################
-#  npsoSSPID.py                                                        #
-#  Offline NPSO tuning of the State-Space PD (SS-PD) gimbal controller #
-########################################################################
+#########################################################
+#  npsoSSPID.py                                         #
+#  Offline NPSO tuning of the State-Space PD (SS-PD)    #
+#########################################################
 
 import rclpy, random, time, subprocess, signal
 from rclpy.node import Node
@@ -18,9 +18,6 @@ EVAL_MAX_SAMPLES = int(EVAL_DURATION_S / Ts)
 
 SETTLE_BEFORE_S = 4.0   # time given to the controller / sim to settle
 CLEANUP_AFTER_S = 3.0   # time given to tear the controller process down
-
-# Wall-clock cost of a single fitness evaluation. Used only to print a time
-# estimate in run_npsoSSPID.py.
 PARTICLE_DURATION = SETTLE_BEFORE_S + EVAL_DURATION_S + CLEANUP_AFTER_S
 
 # Name of the executable created by setup.py for the controller node.
@@ -30,8 +27,6 @@ PARTICLE_DURATION = SETTLE_BEFORE_S + EVAL_DURATION_S + CLEANUP_AFTER_S
 CONTROLLER_EXECUTABLE = 'controller_node'
 
 # ─── Search space Omega and velocity limits (Eq. 32) ───────────────────────
-# KP and KD bracket the Ziegler-Nichols baseline (KP ~ 7.68, KD ~ 0.48);
-# KD = 0 lets the search admit purely proportional action (Sec. 4.3).
 KP_RANGE = (7.0, 14.0)
 KD_RANGE = (0.0, 0.70)
 # omega_o brackets the ZN-SSPD value (~632 rad/s, from omega_o = 2N/Td with
@@ -39,20 +34,16 @@ KD_RANGE = (0.0, 0.70)
 # 2/Ts = 2000 rad/s at Ts = 1 ms; the lower bound avoids excessively slow
 # state estimation.
 OMEGA_RANGE = (20.0, 1000.0)
-
 V_MAX = np.array([0.7, 0.07, 100.0])   # componentwise |v| <= vmax (Eq. 29)
 V_MIN = -V_MAX
 
 # ─── Fitness normalization constants (Eq. 26) ──────────────────────────────
-# IMPORTANT: tools/evaluator.py must use the SAME constants, otherwise the
-# "NPSO value" it reports is not the quantity that was optimised here.
 C_MAE = 50.0   # px
 C_VOL = 5.0    # px
 C_ACC = 2.0    # px
 C_ZC = 1000.0  # crossings
 
 # ─── Reproducibility & scenario metadata (Reviewers 1.4, 1.5, 2.1) ─────────
-# DEFAULT_SEED = None -> runs are NOT reproducible (current behavior).
 # DEFAULT_SEED = 42   -> initial swarm and per-step r1/r2 are reproducible.
 # EVAL_SCENARIO is recorded in the JSON report so that in-sample vs
 # out-of-sample fitness evaluation can be distinguished (Reviewer 1.5).
@@ -322,6 +313,7 @@ class NPSO_SSPD_Optimizer:
 
         self.best_global_particle: Optional[Particle] = None
         self.best_global_fitness = float('inf')
+        self.best_history = []   # list of (iteration, best_so_far_fitness)
 
         self.report = OptimizationReport(
             self.NUM_PARTICLES, self.N_IT,
@@ -551,14 +543,9 @@ class NPSO_SSPD_Optimizer:
                 if round_idx == 0:
                     print(f"\n{'#' * 50}\n   INITIAL ROUND (0/{self.N_IT - 1})\n{'#' * 50}")
                 else:
-                    # Coefficients used to move FROM round_idx-1 TO round_idx
-                    # use rho_{round_idx-1} = (round_idx-1)/N_IT (Eq. 31)
                     w, c1, c2 = _pso_coefficients(round_idx - 1, self.N_IT)
                     print(f"\n{'#' * 50}\n   ROUND {round_idx}/{self.N_IT - 1}\n{'#' * 50}")
                     print(f"  PSO params: w={w:.3f}, c1={c1:.3f}, c2={c2:.3f}")
-                    # Global best of the previous round, shared by all particles
-                    # of this round (best_global_particle is reassigned, never
-                    # mutated, so this reference is a stable snapshot).
                     round_gbest = self.best_global_particle
 
                 for i, particle in enumerate(particles):
@@ -583,6 +570,7 @@ class NPSO_SSPD_Optimizer:
 
                 round_best = min(particles, key=lambda p: p.fitness)
                 self.report.add_iteration_best(round_best)
+                self.best_history.append((round_idx, self.best_global_fitness))
 
                 print(f"\n{'=' * 50}")
                 print(f"   Round {round_idx} summary:")
@@ -596,6 +584,55 @@ class NPSO_SSPD_Optimizer:
             print("\n\nInterrupted!")
             self.report.interrupted = True
             return self.best_global_particle
+        
+    def save_convergence_plot(self, output_path: str):
+        """Save a fitness-vs-iteration convergence plot to `output_path` (.png)."""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("WARNING: matplotlib not installed; skipping convergence plot.")
+            return
+
+        if not self.best_history:
+            print("No optimisation history to plot.")
+            return
+
+        iterations     = [h[0] for h in self.best_history]
+        best_so_far    = [h[1] for h in self.best_history]
+        round_best_all = [p.fitness for p in self.report.best_per_iteration]
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        # Global best (best so far) — the curve the user asked for
+        ax.plot(iterations, best_so_far, 'o-', linewidth=2, markersize=6,
+                color='#1f77b4', label='Global best (best so far)')
+
+        # Round best — optional context
+        if len(round_best_all) == len(iterations):
+            ax.plot(iterations, round_best_all, 's--', linewidth=1.2,
+                    markersize=5, color='#ff7f0e', alpha=0.7,
+                    label='Round best')
+
+        ax.set_xlabel('Iteration', fontsize=12)
+        ax.set_ylabel('Fitness value', fontsize=12)
+
+        title = 'NPSO convergence'
+        if self.report.weights:
+            w = self.report.weights
+            title += (f"\n(MAE={w['mae']}, vol={w['volatility']}, "
+                      f"acc={w['acceleration']}, zc={w['zero_crossings']})")
+        ax.set_title(title, fontsize=11)
+
+        ax.grid(True, linestyle=':', alpha=0.6)
+        ax.legend(loc='upper right')
+        ax.set_xticks(iterations)
+
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=150)
+        plt.close(fig)
+        print(f"📈 Saved convergence plot: {output_path}")
 
     def cleanup(self):
         print("\nCleaning up...")
