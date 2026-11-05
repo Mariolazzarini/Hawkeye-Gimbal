@@ -5,8 +5,8 @@
 #   --experiments <ids>  : List of experiments to run (e.g., --experiments 2 5 6).
 #   --particles <int>    : Number of particles (default: 20).
 #   --iterations <int>   : Number of iterations (default: 10).
-#   --secs <float>       : Evaluation time per particle in seconds (default: 100).
-#   --default            : Resets to standard values (20 particles, 10 iters, 100 secs).
+#   --secs <float>       : Evaluation time per particle in seconds (default: 50).
+#   --default            : Resets to standard values (20 particles, 10 iters, 50 secs).
 #   --force              : Overwrites existing results (re-runs finished experiments).
 #   --yes                : Skips the confirmation prompt before starting.
 # ==============================================================================
@@ -25,7 +25,6 @@ Experiments with a completed report are skipped unless --force is passed.
 Usage (sources ~/setup_py311.sh by itself; any python3 can launch it):
     python3 run_all_npso.py --seed 1 [--experiments 2 5 6] [--particles N]
         [--iterations N] [--secs S] [--default] [--force] [--yes]
-  --default : 20 particles, 10 iterations, 100 s per particle
 """
 
 import os, sys
@@ -436,7 +435,7 @@ def main():
 
     global NUM_PARTICLES, NUM_ITERATIONS, EVAL_DURATION_S, EVAL_MAX_SAMPLES, PARTICLE_DURATION
     if args.default:
-        NUM_PARTICLES, NUM_ITERATIONS, EVAL_DURATION_S = 20, 10, 100.0
+        NUM_PARTICLES, NUM_ITERATIONS, EVAL_DURATION_S = 20, 10, 50.0
     else:
         if args.particles is not None: NUM_PARTICLES = args.particles
         if args.iterations is not None: NUM_ITERATIONS = args.iterations
