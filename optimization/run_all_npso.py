@@ -52,7 +52,7 @@ import matplotlib.pyplot as plt
 
 # ─── Configurations ────────────────────────────────────────────────────────
 Ts = 0.001
-EVAL_DURATION_S = 30.0
+EVAL_DURATION_S = 100.0
 EVAL_MAX_SAMPLES = int(EVAL_DURATION_S / Ts)
 
 SETTLE_BEFORE_S = 4.0
@@ -84,7 +84,12 @@ NUM_ITERATIONS = 10
 # ─── PSO Schedule ──────────────────────────────────────────────────────────
 def _pso_coefficients(k: int, n_it: int):
     rho = k / n_it
-    return 0.9 - 0.5 * rho, 2.0 * (1.0 - rho ** 1.5), 2.0 * (rho ** 1.5)
+    w_max = 2.0
+    w_min = 0.4
+    w = w_max - rho * (w_max - w_min)
+    c1 = 2.0
+    c2 = 2.0
+    return w, c1, c2
 
 def _sign_no_zero(x: np.ndarray) -> np.ndarray:
     """Sign of x where exact zeros inherit the previous sign (no fake zero-crossings)."""
@@ -431,7 +436,7 @@ def main():
 
     global NUM_PARTICLES, NUM_ITERATIONS, EVAL_DURATION_S, EVAL_MAX_SAMPLES, PARTICLE_DURATION
     if args.default:
-        NUM_PARTICLES, NUM_ITERATIONS, EVAL_DURATION_S = 20, 10, 50.0
+        NUM_PARTICLES, NUM_ITERATIONS, EVAL_DURATION_S = 20, 10, 100.0
     else:
         if args.particles is not None: NUM_PARTICLES = args.particles
         if args.iterations is not None: NUM_ITERATIONS = args.iterations
